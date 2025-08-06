@@ -343,7 +343,7 @@ registerRoute("GET", "/events", "Subscribe to server events", async (req, res) =
 });
 
 // Register MCP SSE endpoint
-app.get("/mcp", async (req, res) => {
+app.get("/sse", async (req, res) => {
   try {
     if (!mcpServerEndpoint) {
       throw new ServerError("MCP server endpoint not initialized");
