@@ -7,6 +7,17 @@
         "Authorization": "Bearer test-token"
       },
       "disabled": false
+    },
+    "link-reader": {
+      "type": "sse",
+      "url": "https://mcp.byted.org/api/fc/link-reader/mcp"
+    },
+    "mcp-server-chart": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@antv/mcp-server-chart"
+      ]
     }
   }
 }
