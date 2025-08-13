@@ -449,16 +449,28 @@ export class MCPServerEndpoint {
 
     const capabilityMap = this.registeredCapabilities[capabilityId];
 
-    // Register each capability with original name (last server wins in case of conflicts)
+    // Get prefix from connection config
+    const prefix = connection.config?.prefix;
+
+    // Register each capability with prefix if configured
     for (const cap of capabilities) {
       const originalValue = cap[capType.uidField];
 
+      // Apply prefix to capability name if configured
+      let exposedName = originalValue;
+      let capDefinition = cap;
+      if (prefix && capabilityId === 'tools') {
+        exposedName = `${prefix}_${originalValue}`;
+        // Update the capability definition with the prefixed name
+        capDefinition = { ...cap, [capType.uidField]: exposedName };
+      }
+
       // Store capability with metadata for routing back to original server
       // Note: If multiple servers have the same capability name, the last one to register will be used
-      capabilityMap.set(originalValue, {
+      capabilityMap.set(exposedName, {
         serverName,
         originalName: originalValue,
-        definition: cap,
+        definition: capDefinition,
       });
     }
   }

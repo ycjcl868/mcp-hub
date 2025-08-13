@@ -10,9 +10,11 @@
     },
     "link-reader": {
       "type": "sse",
+      "prefix": "browser",
       "url": "https://mcp.byted.org/api/fc/link-reader/mcp"
     },
     "mcp-server-chart": {
+      "prefix": "chart",
       "command": "npx",
       "args": [
         "-y",
