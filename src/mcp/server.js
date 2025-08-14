@@ -20,7 +20,7 @@
  * Just configure clients with with:
  * {
  *  "Hub": {
- *    "url": "http://localhost:${port}/mcp"
+ *    "url": "http://localhost:${port}/sse"
  *  }
  * }
  * The hub exposes capabilities directly without namespacing:
@@ -30,6 +30,7 @@
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import {
   ListToolsRequestSchema,
   CallToolRequestSchema,
@@ -43,7 +44,9 @@ import {
   GetPromptRequestSchema,
   McpError,
   ErrorCode,
+  isInitializeRequest,
 } from '@modelcontextprotocol/sdk/types.js';
+import { randomUUID } from "node:crypto";
 import { HubState } from '../utils/sse-manager.js';
 import logger from '../utils/logger.js';
 
@@ -162,6 +165,7 @@ export class MCPServerEndpoint {
     this.mcpHub = mcpHub;
     this.clients = new Map(); // sessionId -> { transport, server }
     this.serversMap = new Map(); // sessionId -> server instance
+    this.streamableHttpTransports = new Map(); // sessionId -> StreamableHTTPServerTransport
 
     // Store registered capabilities by type
     this.registeredCapabilities = {};
@@ -177,7 +181,7 @@ export class MCPServerEndpoint {
   }
 
   getEndpointUrl() {
-    return `${this.mcpHub.hubServerUrl}/mcp`;
+    return `${this.mcpHub.hubServerUrl}/sse (SSE) or ${this.mcpHub.hubServerUrl}/mcp (Streamable HTTP)`;
   }
 
   /**
@@ -497,7 +501,7 @@ export class MCPServerEndpoint {
   }
 
   /**
-   * Handle SSE transport creation (GET /mcp)
+   * Handle SSE transport creation (GET /sse)
    */
   async handleSSEConnection(req, res) {
     // Create SSE transport
@@ -575,6 +579,60 @@ export class MCPServerEndpoint {
   }
 
   /**
+   * Handle Streamable HTTP requests (POST/GET/DELETE /mcp)
+   */
+  async handleStreamableHttpRequest(req, res) {
+    // Check for existing session ID
+    const sessionId = req.headers['mcp-session-id'];
+    let transport;
+
+    if (sessionId && this.streamableHttpTransports.has(sessionId)) {
+      // Reuse existing transport
+      transport = this.streamableHttpTransports.get(sessionId);
+    } else if (!sessionId && req.method === 'POST' && isInitializeRequest(req.body)) {
+      // New initialization request
+      transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: () => randomUUID(),
+        onsessioninitialized: (sessionId) => {
+          // Store the transport by session ID
+          this.streamableHttpTransports.set(sessionId, transport);
+        },
+        // DNS rebinding protection is disabled by default for backwards compatibility. If you are running this server
+        // locally, make sure to set:
+        // enableDnsRebindingProtection: true,
+        // allowedHosts: ['127.0.0.1'],
+      });
+
+      // Clean up transport when closed
+      transport.onclose = () => {
+        if (transport.sessionId) {
+          this.streamableHttpTransports.delete(transport.sessionId);
+        }
+      };
+
+      // Create a new server instance
+      const server = this.createServer();
+
+      // Connect to the MCP server
+      await server.connect(transport);
+    } else {
+      // Invalid request
+      res.status(400).json({
+        jsonrpc: '2.0',
+        error: {
+          code: -32000,
+          message: 'Bad Request: No valid session ID provided',
+        },
+        id: null,
+      });
+      return;
+    }
+
+    // Handle the request
+    await transport.handleRequest(req, res, req.body);
+  }
+
+  /**
    * Get statistics about the MCP endpoint
    */
   getStats() {
@@ -610,6 +668,9 @@ export class MCPServerEndpoint {
     }
 
     this.clients.clear();
+
+    // Clear streamable HTTP transports
+    this.streamableHttpTransports.clear();
 
     // Clear all registered capabilities
     Object.values(this.registeredCapabilities).forEach((map) => map.clear());

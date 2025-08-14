@@ -372,6 +372,42 @@ app.post("/messages", async (req, res) => {
   }
 });
 
+// Handle POST requests for client-to-server communication
+app.post('/mcp', async (req, res) => {
+  try {
+    if (!mcpServerEndpoint) {
+      throw new ServerError("MCP server endpoint not initialized");
+    }
+    await mcpServerEndpoint.handleStreamableHttpRequest(req, res);
+  } catch (error) {
+    logger.warn(`Failed to handle MCP streamable HTTP POST request: ${error.message}`);
+    if (!res.headersSent) {
+      res.status(500).send('Error handling MCP request');
+    }
+  }
+});
+
+// Reusable handler for GET and DELETE requests
+const handleSessionRequest = async (req, res) => {
+  try {
+    if (!mcpServerEndpoint) {
+      throw new ServerError("MCP server endpoint not initialized");
+    }
+    await mcpServerEndpoint.handleStreamableHttpRequest(req, res);
+  } catch (error) {
+    logger.warn(`Failed to handle MCP streamable HTTP ${req.method} request: ${error.message}`);
+    if (!res.headersSent) {
+      res.status(500).send('Error handling MCP request');
+    }
+  }
+};
+
+// Handle GET requests for server-to-client notifications via SSE
+app.get('/mcp', handleSessionRequest);
+
+// Handle DELETE requests for session termination
+app.delete('/mcp', handleSessionRequest);
+
 // Register marketplace endpoints
 registerRoute(
   "GET",
