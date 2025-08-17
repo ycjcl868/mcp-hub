@@ -25,7 +25,9 @@
     "LICENSE.md",
     "README.md"
   ],
-  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
   "main": "./dist/cli.js",
   "bin": {
     "mcp-hub": "dist/cli.js"
@@ -34,7 +36,7 @@
     "start": "node ./src/utils/cli.js --port 3000 --config ~/mcp-hub/mcp-servers.json",
     "clean": "rm -rf dist",
     "prebuild": "npm run clean",
-    "build": "node scripts/build.js",
+    "build": "rslib build",
     "postbuild": "chmod +x dist/cli.js",
     "test": "vitest run",
     "test:watch": "vitest watch",
@@ -47,9 +49,9 @@
   "devDependencies": {
     "@eslint/js": "^9.31.0",
     "@modelcontextprotocol/sdk": "^1.17.2",
+    "@rslib/core": "^0.12.1",
     "@vitest/coverage-v8": "^3.2.4",
     "chokidar": "^4.0.3",
-    "esbuild": "^0.25.3",
     "eslint": "^9.31.0",
     "express": "^4.21.2",
     "fast-deep-equal": "^3.1.3",
