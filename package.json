@@ -33,7 +33,7 @@
     "mcp-hub": "dist/cli.js"
   },
   "scripts": {
-    "start": "node ./src/utils/cli.js --port 3000 --config ~/mcp-hub/mcp-servers.json",
+    "start": "node ./src/utils/cli.ts --port 3000 --config ~/mcp-hub/mcp-servers.json",
     "clean": "rm -rf dist",
     "prebuild": "npm run clean",
     "build": "rslib build",
@@ -50,6 +50,9 @@
     "@eslint/js": "^9.31.0",
     "@modelcontextprotocol/sdk": "^1.17.2",
     "@rslib/core": "^0.12.1",
+    "@types/express": "^5.0.3",
+    "@types/uuid": "^10.0.0",
+    "@types/yargs": "^17.0.33",
     "@vitest/coverage-v8": "^3.2.4",
     "chokidar": "^4.0.3",
     "eslint": "^9.31.0",
@@ -63,6 +66,7 @@
     "prettier": "^3.6.2",
     "reconnecting-eventsource": "^1.6.4",
     "supertest": "^7.1.1",
+    "typescript": "^5.9.2",
     "uuid": "^11.1.0",
     "vitest": "^3.2.4",
     "yargs": "^17.7.2"

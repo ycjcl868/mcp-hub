@@ -1,8 +1,44 @@
 import EventEmitter from 'events';
 import logger from './logger.js';
 import { v4 as uuidv4 } from 'uuid';
+import type { Request, Response } from 'express';
 
 const HEART_BEAT_INTERVAL = 10000;
+
+interface SSEManagerOptions {
+  autoShutdown?: boolean;
+  shutdownDelay?: number;
+  heartbeatInterval?: number;
+  workspaceCache?: WorkspaceCache | null;
+  port?: number | null;
+}
+
+interface WorkspaceCache {
+  updateActiveConnections(port: number, count: number): Promise<void>;
+  setShutdownTimer(port: number, delay: number): Promise<void>;
+  cancelShutdownTimer(port: number): Promise<void>;
+}
+
+interface SSEConnection {
+  id: string;
+  res: Response;
+  state: string;
+  connectedAt: Date;
+  lastEventAt: Date;
+  send: (event: string, data: any) => boolean;
+}
+
+interface ConnectionStats {
+  id: string;
+  state: string;
+  connectedAt: Date;
+  lastEventAt: Date;
+}
+
+interface SSEStats {
+  totalConnections: number;
+  connections: ConnectionStats[];
+}
 
 /**
  * Core event types supported by the SSE system
@@ -50,16 +86,19 @@ export const HubState = {
  * Manages Server-Sent Events (SSE) connections and event broadcasting
  */
 export class SSEManager extends EventEmitter {
-  /**
-   * @param {Object} options Configuration options
-   * @param {boolean} options.autoShutdown Whether to shutdown when no clients are connected
-   * @param {number} options.shutdownDelay Delay in ms before shutdown
-   * @param {number} options.heartbeatInterval Interval in ms for heartbeat events
-   */
-  constructor(options = {}) {
+  private connections: Map<string, SSEConnection>;
+  private heartbeatInterval: number;
+  private autoShutdown: boolean;
+  private shutdownDelay: number;
+  private shutdownTimer: NodeJS.Timeout | null;
+  private heartbeatTimer: NodeJS.Timeout | null;
+  private workspaceCache: WorkspaceCache | null;
+  private port: number | null;
+
+  constructor(options: SSEManagerOptions = {}) {
     super();
     this.connections = new Map();
-    this.heartbeatInterval = options.heartbeatInterval || HEART_BEAT_INTERVAL
+    this.heartbeatInterval = options.heartbeatInterval || HEART_BEAT_INTERVAL;
     this.autoShutdown = options.autoShutdown || false;
     this.shutdownDelay = options.shutdownDelay || 0;
     this.shutdownTimer = null;
@@ -73,9 +112,8 @@ export class SSEManager extends EventEmitter {
 
   /**
    * Sets up auto-shutdown behavior when no clients are connected
-   * @private
    */
-  setupAutoShutdown() {
+  private setupAutoShutdown(): void {
     if (!this.autoShutdown) return;
 
     logger.debug("Setting up auto shutting down")
@@ -108,9 +146,8 @@ export class SSEManager extends EventEmitter {
 
   /**
    * Sets up periodic heartbeat events
-   * @private
    */
-  setupHeartbeat() {
+  private setupHeartbeat(): void {
     this.heartbeatTimer = setInterval(() => {
       this.broadcast(EventTypes.HEARTBEAT, {
         connections: this.connections.size,
@@ -124,20 +161,17 @@ export class SSEManager extends EventEmitter {
 
   /**
    * Adds a new SSE connection
-   * @param {Request} req Express request object
-   * @param {Response} res Express response object
-   * @returns {Object} Connection object
    */
-  async addConnection(req, res) {
+  async addConnection(req: Request, res: Response): Promise<SSEConnection> {
     const id = uuidv4();
 
-    const connection = {
+    const connection: SSEConnection = {
       id,
       res,
       state: ConnectionState.CONNECTED,
       connectedAt: new Date(),
       lastEventAt: new Date(),
-      send: (event, data) => {
+      send: (event: string, data: any): boolean => {
         if (res.writableEnded) return false;
 
         try {
@@ -149,7 +183,7 @@ export class SSEManager extends EventEmitter {
 
           connection.lastEventAt = new Date();
           return true;
-        } catch (error) {
+        } catch (error: any) {
           logger.error('SSE_SEND_ERROR', error.message, {
             clientId: id,
             event,

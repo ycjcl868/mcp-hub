@@ -2,6 +2,33 @@ import fs from "fs";
 import path from "path";
 import { getLogDirectory } from "./xdg-paths.js";
 
+interface LoggerOptions {
+  logFile?: string;
+  logLevel?: LogLevel;
+  enableFileLogging?: boolean;
+}
+
+interface LogEntry {
+  type: LogLevel;
+  message: string;
+  data: Record<string, any>;
+  timestamp: string;
+  code?: string;
+}
+
+interface LogOptions {
+  exit?: boolean;
+  exitCode?: number;
+  level?: LogLevel;
+}
+
+type LogLevel = 'error' | 'warn' | 'info' | 'debug';
+type ConsoleMethod = 'error' | 'warn' | 'debug' | 'log';
+
+interface SSEManager {
+  broadcast(event: string, data: any): void;
+}
+
 /**
  * Logger class that handles both file and console logging with structured JSON output
  */
@@ -9,10 +36,16 @@ import { getLogDirectory } from "./xdg-paths.js";
 const LOG_DIR = getLogDirectory();
 const LOG_FILE = "mcp-hub.log";
 class Logger {
-  constructor(options = {}) {
+  private logFile: string;
+  private logLevel: LogLevel;
+  private enableFileLogging: boolean;
+  private sseManager: SSEManager | null;
+  private readonly LOG_LEVELS: Record<LogLevel, number>;
+
+  constructor(options: LoggerOptions = {}) {
     this.logFile = options.logFile || path.join(LOG_DIR, LOG_FILE);
     this.logLevel = options.logLevel || 'info';
-    this.enableFileLogging = options.enableFileLogging !== false
+    this.enableFileLogging = options.enableFileLogging !== false;
     this.sseManager = null;
 
     this.LOG_LEVELS = {
@@ -29,16 +62,15 @@ class Logger {
 
   /**
    * Sets the SSE manager for real-time log streaming
-   * @param {SSEManager} manager SSE manager instance
    */
-  setSseManager(manager) {
+  setSseManager(manager: SSEManager): void {
     this.sseManager = manager;
   }
 
   /**
    * Initialize log file
    */
-  initializeLogFile() {
+  private initializeLogFile(): void {
     if (!this.enableFileLogging) return;
 
     try {
@@ -46,7 +78,7 @@ class Logger {
       fs.mkdirSync(logDir, { recursive: true });
       //--empty the log file
       fs.writeFileSync(this.logFile, '');
-    } catch (error) {
+    } catch (error: any) {
       console.error(`Failed to initialize log file: ${error.message}`);
       this.enableFileLogging = false;
     }
@@ -55,8 +87,8 @@ class Logger {
   /**
    * Setup error handlers for EPIPE
    */
-  setupErrorHandlers() {
-    const handleError = (error) => {
+  private setupErrorHandlers(): void {
+    const handleError = (error: any) => {
       //INFO: when mcp-hub is not started from a terminal, but bya program when the program is closed, writing to stdout,stderr will throw an EPIPE error
       if (error.code !== 'EPIPE') {
         console.error('Stream error:', error);
@@ -70,12 +102,12 @@ class Logger {
   /**
    * Core logging method that all other methods use
    */
-  log(type, message, data = {}, code = null, options = {}) {
+  log(type: LogLevel, message: string, data: Record<string, any> = {}, code: string | null = null, options: LogOptions = {}): void {
     const { exit = false, exitCode = 1, level = type } = options;
 
     if (this.LOG_LEVELS[this.logLevel] < this.LOG_LEVELS[level]) return;
 
-    const entry = {
+    const entry: LogEntry = {
       type,
       message,
       data,
@@ -84,7 +116,7 @@ class Logger {
     };
 
     // Console output
-    const consoleMethod = type === 'error' ? 'error' :
+    const consoleMethod: ConsoleMethod = type === 'error' ? 'error' :
       type === 'warn' ? 'warn' :
         type === 'debug' ? 'debug' : 'log';
 
@@ -103,12 +135,12 @@ class Logger {
     }
   }
 
-  file(message, data = {}) {
+  file(message: string, data: Record<string, any> = {}): void {
     // File output
     if (this.enableFileLogging) {
       try {
         fs.appendFileSync(this.logFile, message + '\n');
-      } catch (error) {
+      } catch (error: any) {
         if (error.code !== 'EPIPE') {
           this.enableFileLogging = false;
         }
@@ -119,14 +151,14 @@ class Logger {
   /**
    * Log status update
    */
-  logUpdate(metadata = {}) {
+  logUpdate(metadata: Record<string, any> = {}): void {
     this.log('info', 'MCP Hub status updated', metadata, 'MCP_HUB_UPDATED');
   }
 
   /**
    * Log capability changes
    */
-  logCapabilityChange(type, serverName, data = {}) {
+  logCapabilityChange(type: string, serverName: string, data: Record<string, any> = {}): void {
     this.log(
       'info',
       `${serverName} ${type.toLowerCase()} list updated`,
@@ -138,35 +170,35 @@ class Logger {
   /**
    * Log info message
    */
-  info(message, data = {}) {
+  info(message: string, data: Record<string, any> = {}): void {
     this.log('info', message, data);
   }
 
   /**
    * Log warning message
    */
-  warn(message, data = {}) {
+  warn(message: string, data: Record<string, any> = {}): void {
     this.log('warn', message, data);
   }
 
   /**
    * Log debug message
    */
-  debug(message, data = {}) {
+  debug(message: string, data: Record<string, any> = {}): void {
     this.log('debug', message, data);
   }
 
   /**
    * Log error message
    */
-  error(code, message, data = {}, exit = true, exitCode = 1) {
+  error(code: string, message: string, data: Record<string, any> = {}, exit: boolean = true, exitCode: number = 1): void {
     this.log('error', message, data, code, { exit, exitCode });
   }
 
   /**
    * Set log level
    */
-  setLogLevel(level) {
+  setLogLevel(level: LogLevel): void {
     if (this.LOG_LEVELS[level] !== undefined) {
       this.logLevel = level;
     }
@@ -175,7 +207,7 @@ class Logger {
   /**
    * Enable/disable file logging
    */
-  setFileLogging(enable) {
+  setFileLogging(enable: boolean): void {
     this.enableFileLogging = enable;
     if (enable) {
       this.initializeLogFile();
@@ -189,7 +221,7 @@ const logger = new Logger({
 });
 
 // Handle unhandled errors
-process.on("uncaughtException", (error) => {
+process.on("uncaughtException", (error: any) => {
   logger.error(
     error.code || "UNHANDLED_ERROR",
     `An unhandled error occurred: ${error}`,
@@ -198,7 +230,7 @@ process.on("uncaughtException", (error) => {
 });
 
 // Handle unhandled promise rejections 
-process.on("unhandledRejection", (error) => {
+process.on("unhandledRejection", (error: any) => {
   logger.error(
     "UNHANDLED_REJECTION",
     `An unhandled rejection occurred: ${error}`,

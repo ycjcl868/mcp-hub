@@ -7,15 +7,52 @@ import fs from 'fs/promises';
 import path from 'path';
 import { getDataDirectory } from "./xdg-paths.js";
 
+interface OAuthClientInfo {
+  [key: string]: any;
+}
+
+interface OAuthTokens {
+  access_token: string;
+  refresh_token?: string;
+  expires_in?: number;
+  token_type?: string;
+  [key: string]: any;
+}
+
+interface ServerStorage {
+  clientInfo: OAuthClientInfo | null;
+  tokens: OAuthTokens | null;
+  codeVerifier: string | null;
+}
+
+type ServersStorage = Record<string, ServerStorage>;
+
+interface OAuthProviderOptions {
+  serverName: string;
+  serverUrl: string;
+  hubServerUrl: string;
+}
+
+interface ClientMetadata {
+  redirect_uris: string[];
+  token_endpoint_auth_method: string;
+  grant_types: string[];
+  response_types: string[];
+  client_name: string;
+  client_uri: string;
+}
+
 // File level storage
-let serversStorage = {};
+let serversStorage: ServersStorage = {};
 
 class StorageManager {
+  private path: string;
+
   constructor() {
     this.path = path.join(getDataDirectory(), 'oauth-storage.json');
   }
 
-  async init() {
+  async init(): Promise<void> {
     try {
       await fs.mkdir(path.dirname(this.path), { recursive: true });
       try {
@@ -31,7 +68,7 @@ class StorageManager {
     }
   }
 
-  async save() {
+  async save(): Promise<void> {
     try {
       await fs.writeFile(this.path, JSON.stringify(serversStorage, null, 2), 'utf8');
     } catch (err) {
@@ -39,14 +76,14 @@ class StorageManager {
     }
   }
 
-  get(serverUrl) {
+  get(serverUrl: string): ServerStorage {
     if (!serversStorage[serverUrl]) {
       serversStorage[serverUrl] = { clientInfo: null, tokens: null, codeVerifier: null };
     }
     return serversStorage[serverUrl];
   }
 
-  async update(serverUrl, data) {
+  async update(serverUrl: string, data: Partial<ServerStorage>): Promise<void> {
     const serverData = this.get(serverUrl);
     serversStorage[serverUrl] = { ...serverData, ...data };
     return this.save();
@@ -60,20 +97,25 @@ const storage = new StorageManager();
 storage.init();
 
 export default class MCPHubOAuthProvider {
-  constructor({ serverName, serverUrl, hubServerUrl }) {
+  private serverName: string;
+  private serverUrl: string;
+  private hubServerUrl: string;
+  private generatedAuthUrl: string | null;
+
+  constructor({ serverName, serverUrl, hubServerUrl }: OAuthProviderOptions) {
     this.serverName = serverName;
     this.serverUrl = serverUrl;
     this.hubServerUrl = hubServerUrl;
     this.generatedAuthUrl = null;
   }
 
-  get redirectUrl() {
+  get redirectUrl(): string {
     const callbackURL = new URL("/api/oauth/callback", this.hubServerUrl);
     callbackURL.searchParams.append("server_name", this.serverName);
     return callbackURL.toString();
   }
 
-  get clientMetadata() {
+  get clientMetadata(): ClientMetadata {
     return {
       redirect_uris: [this.redirectUrl],
       token_endpoint_auth_method: "none",
@@ -84,38 +126,38 @@ export default class MCPHubOAuthProvider {
     };
   }
 
-  async clientInformation() {
+  async clientInformation(): Promise<OAuthClientInfo | null> {
     const data = storage.get(this.serverUrl);
     logger.file(`[${this.serverName}] Getting client information`);
     return data.clientInfo;
   }
 
-  async saveClientInformation(info) {
+  async saveClientInformation(info: OAuthClientInfo): Promise<void> {
     logger.file(`[${this.serverName}] Saving client information`);
     return storage.update(this.serverUrl, { clientInfo: info });
   }
 
-  async tokens() {
+  async tokens(): Promise<OAuthTokens | null> {
     return storage.get(this.serverUrl).tokens;
   }
 
-  async saveTokens(tokens) {
+  async saveTokens(tokens: OAuthTokens): Promise<void> {
     logger.file(`[${this.serverName}] Saving tokens`);
     return storage.update(this.serverUrl, { tokens });
   }
 
-  async redirectToAuthorization(authUrl) {
+  async redirectToAuthorization(authUrl: string): Promise<boolean> {
     logger.file(`[${this.serverName}] Redirecting to authorization`);
     this.generatedAuthUrl = authUrl;
     return true;
   }
 
-  async saveCodeVerifier(verifier) {
+  async saveCodeVerifier(verifier: string): Promise<void> {
     logger.file(`[${this.serverName}] Saving code verifier`);
     return storage.update(this.serverUrl, { codeVerifier: verifier });
   }
 
-  async codeVerifier() {
+  async codeVerifier(): Promise<string | null> {
     logger.file(`[${this.serverName}] Getting Code verifier`);
     return storage.get(this.serverUrl).codeVerifier;
   }

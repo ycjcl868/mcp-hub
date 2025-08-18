@@ -49,14 +49,46 @@ import {
 import { randomUUID } from "node:crypto";
 import { HubState } from '../utils/sse-manager.js';
 import logger from '../utils/logger.js';
+import type { Request, Response } from 'express';
+import type { MCPHub } from '../MCPHub.js';
+import type { MCPConnection } from '../MCPConnection.js';
 
 // Unique server name to identify our internal MCP endpoint
 const HUB_INTERNAL_SERVER_NAME = 'mcp-hub-internal-endpoint';
 
 const MCP_REQUEST_TIMEOUT = 5 * 60 * 1000; //Default to 5 minutes
 
+interface CapabilityRegistration {
+  serverName: string;
+  originalName: string;
+  definition: any;
+}
+
+interface CapabilityTypeConfig {
+  id: string;
+  uidField: string;
+  syncWithEvents?: {
+    events: string[];
+    capabilityIds: string[];
+    notificationMethod: string;
+  };
+  listSchema?: any;
+  handler?: {
+    method: string;
+    callSchema?: any;
+    resultSchema?: any;
+    form_error: (error: Error | unknown) => any;
+    form_params: (cap: CapabilityRegistration, request: any) => any;
+  };
+}
+
+interface ClientInfo {
+  transport: any;
+  server: Server;
+}
+
 // Comprehensive capability configuration
-const CAPABILITY_TYPES = {
+const CAPABILITY_TYPES: Record<string, CapabilityTypeConfig> = {
   TOOLS: {
     id: 'tools',
     uidField: 'name',
@@ -70,7 +102,7 @@ const CAPABILITY_TYPES = {
       method: 'tools/call',
       callSchema: CallToolRequestSchema,
       resultSchema: CallToolResultSchema,
-      form_error(error) {
+      form_error(error: Error | unknown) {
         return {
           content: [
             {
@@ -81,7 +113,7 @@ const CAPABILITY_TYPES = {
           isError: true,
         };
       },
-      form_params(cap, request) {
+      form_params(cap: CapabilityRegistration, request: any) {
         return {
           name: cap.originalName,
           arguments: request.params.arguments || {},
@@ -100,13 +132,13 @@ const CAPABILITY_TYPES = {
     listSchema: ListResourcesRequestSchema,
     handler: {
       method: 'resources/read',
-      form_error(error) {
+      form_error(error: Error | unknown) {
         throw new McpError(
           ErrorCode.InvalidParams,
-          `Failed to read resource: ${error.message}`,
+          `Failed to read resource: ${error instanceof Error ? error.message : String(error)}`,
         );
       },
-      form_params(cap, request) {
+      form_params(cap: CapabilityRegistration, request: any) {
         return {
           uri: cap.originalName,
         };
@@ -140,16 +172,16 @@ const CAPABILITY_TYPES = {
       method: 'prompts/get',
       callSchema: GetPromptRequestSchema,
       resultSchema: GetPromptResultSchema,
-      form_params(cap, request) {
+      form_params(cap: CapabilityRegistration, request: any) {
         return {
           name: cap.originalName,
           arguments: request.params.arguments || {},
         };
       },
-      form_error(error) {
+      form_error(error: Error | unknown) {
         throw new McpError(
           ErrorCode.InvalidParams,
-          `Failed to read resource: ${error.message}`,
+          `Failed to read resource: ${error instanceof Error ? error.message : String(error)}`,
         );
       },
     },
@@ -161,7 +193,13 @@ const CAPABILITY_TYPES = {
  * This allows standard MCP clients to connect to mcp-hub via MCP protocol
  */
 export class MCPServerEndpoint {
-  constructor(mcpHub) {
+  private mcpHub: MCPHub;
+  private clients: Map<string, ClientInfo>;
+  private serversMap: Map<string, MCPConnection>;
+  private streamableHttpTransports: Map<string, any>;
+  private registeredCapabilities: Record<string, Map<string, CapabilityRegistration>>;
+
+  constructor(mcpHub: MCPHub) {
     this.mcpHub = mcpHub;
     this.clients = new Map(); // sessionId -> { transport, server }
     this.serversMap = new Map(); // sessionId -> server instance
@@ -180,14 +218,14 @@ export class MCPServerEndpoint {
     this.syncCapabilities();
   }
 
-  getEndpointUrl() {
+  getEndpointUrl(): string {
     return `${this.mcpHub.hubServerUrl}/sse (SSE) or ${this.mcpHub.hubServerUrl}/mcp (Streamable HTTP)`;
   }
 
   /**
    * Create a new MCP server instance for each connection
    */
-  createServer() {
+  createServer(): Server {
     // Create low-level MCP server instance with unique name
     const server = new Server(
       {
@@ -220,14 +258,14 @@ export class MCPServerEndpoint {
   /**
    * Creates a safe server name for namespacing (replace special chars with underscores)
    */
-  createSafeServerName(serverName) {
+  createSafeServerName(serverName: string): string {
     return serverName.replace(/[^a-zA-Z0-9]/g, '_');
   }
 
   /**
    * Setup MCP request handlers for a server instance
    */
-  setupRequestHandlers(server) {
+  setupRequestHandlers(server: Server): void {
     // Setup handlers for each capability type
     Object.values(CAPABILITY_TYPES).forEach((capType) => {
       const capId = capType.id;
@@ -256,7 +294,7 @@ export class MCPServerEndpoint {
             if (!registeredCap) {
               throw new McpError(
                 ErrorCode.InvalidParams,
-                `${capId} capability not found: ${key}`,
+                `${capId} capability not found: ${request.params[capType.uidField]}`,
               );
             }
             const { serverName, originalName } = registeredCap;
@@ -267,18 +305,18 @@ export class MCPServerEndpoint {
               const result = await this.mcpHub.rawRequest(
                 serverName,
                 {
-                  method: capType.handler.method,
-                  params: capType.handler.form_params(registeredCap, request),
+                  method: capType.handler!.method,
+                  params: capType.handler!.form_params(registeredCap, request),
                 },
-                capType.handler.resultSchema,
+                capType.handler!.resultSchema,
                 request_options,
               );
               return result;
             } catch (error) {
               logger.debug(
-                `Error executing ${capId} '${originalName}': ${error.message}`,
+                `Error executing ${capId} '${originalName}': ${error instanceof Error ? error.message : String(error)}`,
               );
-              return capType.handler.form_error(error);
+              return capType.handler!.form_error(error);
             }
           },
         );
@@ -286,7 +324,7 @@ export class MCPServerEndpoint {
     });
   }
 
-  getRegisteredCapability(request, capId, uidField) {
+  getRegisteredCapability(request: any, capId: string, uidField: string): CapabilityRegistration | undefined {
     const capabilityMap = this.registeredCapabilities[capId];
     let key = request.params[uidField];
     const registeredCap = capabilityMap.get(key);
@@ -296,7 +334,7 @@ export class MCPServerEndpoint {
   /**
    * Setup listeners for capability changes from managed servers
    */
-  setupCapabilitySync() {
+  setupCapabilitySync(): void {
     // For each capability type with syncWithEvents
     Object.values(CAPABILITY_TYPES).forEach((capType) => {
       if (capType.syncWithEvents) {
@@ -336,9 +374,9 @@ export class MCPServerEndpoint {
 
   /**
    * Synchronize capabilities from connected servers
-   * @param {string[]} capabilityIds - Specific capability IDs to sync, defaults to all
+   * @param capabilityIds - Specific capability IDs to sync, defaults to all
    */
-  syncCapabilities(capabilityIds = null) {
+  syncCapabilities(capabilityIds: string[] | null = null): void {
     // Default to all capability IDs if none specified
     const idsToSync =
       capabilityIds ||
@@ -370,7 +408,7 @@ export class MCPServerEndpoint {
    * Synchronize the servers map with current connection states
    * Creates safe server IDs for namespacing capabilities
    */
-  syncServersMap() {
+  syncServersMap(): void {
     this.serversMap.clear();
 
     // Register all connected servers with unique safe IDs
@@ -395,7 +433,7 @@ export class MCPServerEndpoint {
   /**
    * Synchronize a specific capability type and detect changes
    */
-  syncCapabilityType(capabilityId) {
+  syncCapabilityType(capabilityId: string): boolean {
     const capabilityMap = this.registeredCapabilities[capabilityId];
     const previousKeys = new Set(capabilityMap.keys());
 
@@ -418,13 +456,13 @@ export class MCPServerEndpoint {
   /**
    * Send capability change notifications to all connected clients
    */
-  notifyCapabilityChanges(notificationMethod) {
+  notifyCapabilityChanges(notificationMethod: string): void {
     for (const { server } of this.clients.values()) {
       try {
-        server[notificationMethod]();
+        (server as any)[notificationMethod]();
       } catch (error) {
         logger.warn(
-          `Error sending ${notificationMethod} notification: ${error.message}`,
+          `Error sending ${notificationMethod} notification: ${error instanceof Error ? error.message : String(error)}`,
         );
       }
     }
@@ -434,7 +472,7 @@ export class MCPServerEndpoint {
    * Register capabilities from a server connection for a specific capability type
    * Creates namespaced capability names to avoid conflicts between servers
    */
-  registerServerCapabilities(connection, { capabilityId, serverId }) {
+  registerServerCapabilities(connection: MCPConnection, { capabilityId, serverId }: { capabilityId: string; serverId: string }): void {
     const serverName = connection.name;
 
     // Skip self-reference to prevent infinite recursion
@@ -446,7 +484,7 @@ export class MCPServerEndpoint {
     const capType = Object.values(CAPABILITY_TYPES).find(
       (cap) => cap.id === capabilityId,
     );
-    const capabilities = connection[capabilityId];
+    const capabilities = (connection as any)[capabilityId];
     if (!capabilities || !Array.isArray(capabilities)) {
       return; // No capabilities of this type
     }
@@ -454,11 +492,11 @@ export class MCPServerEndpoint {
     const capabilityMap = this.registeredCapabilities[capabilityId];
 
     // Get prefix from connection config
-    const prefix = connection.config?.prefix;
+    const prefix = (connection.config as any)?.prefix;
 
     // Register each capability with prefix if configured
     for (const cap of capabilities) {
-      const originalValue = cap[capType.uidField];
+      const originalValue = cap[capType!.uidField];
 
       // Apply prefix to capability name if configured
       let exposedName = originalValue;
@@ -466,7 +504,7 @@ export class MCPServerEndpoint {
       if (prefix && capabilityId === 'tools') {
         exposedName = `${prefix}_${originalValue}`;
         // Update the capability definition with the prefixed name
-        capDefinition = { ...cap, [capType.uidField]: exposedName };
+        capDefinition = { ...cap, [capType!.uidField]: exposedName };
       }
 
       // Store capability with metadata for routing back to original server
@@ -482,7 +520,7 @@ export class MCPServerEndpoint {
   /**
    * Check if a connection is a self-reference (connecting to our own MCP endpoint)
    */
-  isSelfReference(connection) {
+  isSelfReference(connection: MCPConnection): boolean {
     // Primary check: Compare server's reported name with our internal server name
     if (
       connection.serverInfo &&
@@ -496,14 +534,14 @@ export class MCPServerEndpoint {
   /**
    * Check if there are any active MCP client connections
    */
-  hasActiveConnections() {
+  hasActiveConnections(): boolean {
     return this.clients.size > 0;
   }
 
   /**
    * Handle SSE transport creation (GET /sse)
    */
-  async handleSSEConnection(req, res) {
+  async handleSSEConnection(req: Request, res: Response): Promise<void> {
     // Create SSE transport
     const transport = new SSEServerTransport('/messages', res);
     const sessionId = transport.sessionId;
@@ -514,7 +552,7 @@ export class MCPServerEndpoint {
     // Store transport and server together
     this.clients.set(sessionId, { transport, server });
 
-    let clientInfo;
+    let clientInfo: any;
 
     // Setup cleanup on close
     const cleanup = async () => {
@@ -523,7 +561,7 @@ export class MCPServerEndpoint {
         await server.close();
       } catch (error) {
         logger.warn(
-          `Error closing server connected to ${clientInfo?.name ?? 'Unknown'}: ${error.message}`,
+          `Error closing server connected to ${clientInfo?.name ?? 'Unknown'}: ${error instanceof Error ? error.message : String(error)}`,
         );
       } finally {
         logger.info(
@@ -548,9 +586,9 @@ export class MCPServerEndpoint {
   /**
    * Handle MCP messages (POST /messages)
    */
-  async handleMCPMessage(req, res) {
-    const sessionId = req.query.sessionId;
-    function sendErrorResponse(code, error) {
+  async handleMCPMessage(req: Request, res: Response): Promise<void> {
+    const sessionId = req.query.sessionId as string;
+    function sendErrorResponse(code: number, error: Error) {
       res.status(code).json({
         jsonrpc: '2.0',
         error: {
@@ -581,10 +619,10 @@ export class MCPServerEndpoint {
   /**
    * Handle Streamable HTTP requests (POST/GET/DELETE /mcp)
    */
-  async handleStreamableHttpRequest(req, res) {
+  async handleStreamableHttpRequest(req: Request, res: Response): Promise<void> {
     // Check for existing session ID
-    const sessionId = req.headers['mcp-session-id'];
-    let transport;
+    const sessionId = req.headers['mcp-session-id'] as string;
+    let transport: any;
 
     if (sessionId && this.streamableHttpTransports.has(sessionId)) {
       // Reuse existing transport
@@ -593,7 +631,7 @@ export class MCPServerEndpoint {
       // New initialization request
       transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
-        onsessioninitialized: (sessionId) => {
+        onsessioninitialized: (sessionId: string) => {
           // Store the transport by session ID
           this.streamableHttpTransports.set(sessionId, transport);
         },
@@ -635,9 +673,9 @@ export class MCPServerEndpoint {
   /**
    * Get statistics about the MCP endpoint
    */
-  getStats() {
+  getStats(): { activeClients: number; registeredCapabilities: Record<string, number>; totalCapabilities: number } {
     const capabilityCounts = Object.entries(this.registeredCapabilities).reduce(
-      (acc, [type, map]) => {
+      (acc: Record<string, number>, [type, map]) => {
         acc[type] = map.size;
         return acc;
       },
@@ -648,7 +686,7 @@ export class MCPServerEndpoint {
       activeClients: this.clients.size,
       registeredCapabilities: capabilityCounts,
       totalCapabilities: Object.values(capabilityCounts).reduce(
-        (sum, count) => sum + count,
+        (sum: number, count: number) => sum + count,
         0,
       ),
     };
@@ -657,13 +695,13 @@ export class MCPServerEndpoint {
   /**
    * Close all transports and cleanup
    */
-  async close() {
+  async close(): Promise<void> {
     // Close all servers (which will close their transports)
     for (const [sessionId, { server }] of this.clients) {
       try {
         await server.close();
       } catch (error) {
-        logger.debug(`Error closing server ${sessionId}: ${error.message}`);
+        logger.debug(`Error closing server ${sessionId}: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
 
