@@ -6,6 +6,40 @@ import logger from './logger.js';
 
 const execPromise = promisify(exec);
 
+interface EnvResolverOptions {
+  maxPasses?: number;
+  commandTimeout?: number;
+  strict?: boolean;
+}
+
+interface PredefinedVars {
+  workspaceFolder: string;
+  userHome: string;
+  pathSeparator: string;
+  workspaceFolderBasename: string;
+  cwd: string;
+  '/': string;
+}
+
+interface PlaceholderMatch {
+  fullMatch: string;
+  content: string;
+  startIndex: number;
+  endIndex: number;
+}
+
+type ConfigValue = string | number | boolean | null | undefined | Record<string, any> | any[];
+
+interface ResolveableConfig {
+  env?: Record<string, any>;
+  args?: any[];
+  headers?: Record<string, any>;
+  url?: string;
+  command?: string;
+  cwd?: string;
+  [key: string]: ConfigValue;
+}
+
 /**
  * Universal environment variable resolver with support for:
  * - ${ENV_VAR} - resolve from context then process.env
@@ -14,7 +48,11 @@ const execPromise = promisify(exec);
  * - Safe resolution from adjacent fields
  */
 export class EnvResolver {
-  constructor(options = {}) {
+  private maxPasses: number;
+  private commandTimeout: number;
+  private strict: boolean;
+
+  constructor(options: EnvResolverOptions = {}) {
     this.maxPasses = options.maxPasses || 10;
     this.commandTimeout = options.commandTimeout || 30000;
     this.strict = options.strict !== false; // Default to strict mode
@@ -24,7 +62,7 @@ export class EnvResolver {
    * Parse global environment variables from MCP_HUB_ENV
    * @returns {Object} - Parsed global environment variables
    */
-  _parseGlobalEnv() {
+  private _parseGlobalEnv(): Record<string, any> {
     try {
       const globalEnvJson = process.env.MCP_HUB_ENV;
       if (!globalEnvJson) return {};
@@ -44,10 +82,9 @@ export class EnvResolver {
 
   /**
    * Resolve VS Code predefined variables
-   * @param {Object} context - Current context (includes cwd, etc.)
    * @returns {Object} - Predefined variables
    */
-  _resolvePredefinedVars() {
+  private _resolvePredefinedVars(): PredefinedVars {
     const workspaceFolder = process.cwd();
     const userHome = os.homedir();
     const pathSeparator = path.sep;
@@ -69,7 +106,7 @@ export class EnvResolver {
    * @param {Array} fieldsToResolve - Fields that should be resolved ['env', 'args', 'headers', 'url', 'command']
    * @returns {Object} - Resolved configuration
    */
-  async resolveConfig(config, fieldsToResolve = ['env', 'args', 'headers', 'url', 'command', 'cwd']) {
+  async resolveConfig(config: ResolveableConfig, fieldsToResolve: string[] = ['env', 'args', 'headers', 'url', 'command', 'cwd']): Promise<ResolveableConfig> {
     const resolved = JSON.parse(JSON.stringify(config)); // Deep clone
 
     // Build context with correct priority: predefinedVars → process.env → globalEnv
@@ -104,7 +141,7 @@ export class EnvResolver {
   /**
    * Universal field resolver that handles any field type with ${} placeholders
    */
-  async _resolveFieldUniversal(fieldValue, context, fieldType) {
+  private async _resolveFieldUniversal(fieldValue: ConfigValue, context: Record<string, any>, fieldType: string): Promise<ConfigValue> {
     if (fieldType === 'env' && typeof fieldValue === 'object') {
       // Handle env object with multi-pass resolution
       return await this._resolveEnvObject(fieldValue, context);
@@ -155,7 +192,7 @@ export class EnvResolver {
   /**
    * Resolve env object - simple single-pass resolution
    */
-  async _resolveEnvObject(envConfig, baseContext) {
+  private async _resolveEnvObject(envConfig: Record<string, any>, baseContext: Record<string, any>): Promise<Record<string, any>> {
     const resolved = {};
 
     for (const [key, value] of Object.entries(envConfig)) {
@@ -178,7 +215,7 @@ export class EnvResolver {
   /**
    * Resolve all ${} placeholders in a string, with support for nested placeholders.
    */
-  async _resolveStringWithPlaceholders(str, context, depth = 0) {
+  private async _resolveStringWithPlaceholders(str: string, context: Record<string, any>, depth: number = 0): Promise<string> {
     if (depth > this.maxPasses) {
       throw new Error('Max placeholder resolution depth exceeded, possible circular reference.');
     }
@@ -251,7 +288,7 @@ export class EnvResolver {
    * Finds top-level placeholders ${...} in a string, correctly handling nested ones.
    * @returns {Array<{fullMatch: string, content: string, startIndex: number, endIndex: number}>}
    */
-  _findTopLevelPlaceholders(str) {
+  private _findTopLevelPlaceholders(str: string): PlaceholderMatch[] {
     const placeholders = [];
     let searchIndex = 0;
     const strLength = str.length;
@@ -297,7 +334,7 @@ export class EnvResolver {
   /**
    * Check if value contains command syntax
    */
-  _isCommand(value) {
+  private _isCommand(value: any): boolean {
     return typeof value === 'string' &&
       (value.startsWith('$:') || /\$\{cmd:\s*[^}]+\}/.test(value));
   }
@@ -305,7 +342,7 @@ export class EnvResolver {
   /**
    * Execute command content (without ${} wrapper) and return trimmed output
    */
-  async _executeCommandContent(content) {
+  private async _executeCommandContent(content: string): Promise<string> {
     // content is already resolved and should be "cmd: command args"
     const command = content.slice(4).trim(); // Remove "cmd:" prefix
 
@@ -323,10 +360,9 @@ export class EnvResolver {
   }
 
   /**
-  /**
    * Execute command and return trimmed output (wrapper for backward compatibility)
    */
-  async _executeCommand(value) {
+  private async _executeCommand(value: string): Promise<string> {
     if (value.startsWith('$:')) {
       // Legacy syntax: $: command args (deprecated but still supported)
       logger.warn(`DEPRECATED: Legacy command syntax '$:' is deprecated. Use '\${cmd: command args}' instead. Found: ${value}`);
@@ -355,7 +391,7 @@ export class EnvResolver {
 export const envResolver = new EnvResolver({ strict: true });
 
 // Export legacy function for backward compatibility
-export async function resolveEnvironmentVariables(envConfig) {
+export async function resolveEnvironmentVariables(envConfig: Record<string, any>): Promise<Record<string, any>> {
   logger.warn('DEPRECATED: resolveEnvironmentVariables function is deprecated, use EnvResolver.resolveConfig instead');
   const resolver = new EnvResolver();
   const resolved = await resolver.resolveConfig({ env: envConfig }, ['env']);

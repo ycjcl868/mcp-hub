@@ -9,8 +9,42 @@ import {
 } from "./utils/errors.js";
 import EventEmitter from "events";
 
+interface MCPHubOptions {
+  port?: number;
+  watch?: boolean;
+  marketplace?: any;
+}
+
+interface ServerStartResult {
+  name: string;
+  status: "success" | "error";
+  config: any;
+  error?: string;
+}
+
+interface ChangeSet {
+  added: string[];
+  removed: string[];
+  modified: string[];
+  unchanged: string[];
+  details: Record<string, any>;
+}
+
+interface ServerRefreshResult {
+  name: string;
+  status: string;
+  error?: string;
+}
+
 export class MCPHub extends EventEmitter {
-  constructor(configPathOrObject, { port, watch = false, marketplace } = {}) {
+  public connections: Map<string, MCPConnection>;
+  public port?: number;
+  public hubServerUrl: string;
+  public configManager: ConfigManager;
+  public shouldWatchConfig: boolean;
+  public marketplace?: any;
+
+  constructor(configPathOrObject: string | string[] | object, { port, watch = false, marketplace }: MCPHubOptions = {}) {
     super();
     this.connections = new Map();
     this.port = port;
@@ -19,19 +53,20 @@ export class MCPHub extends EventEmitter {
     this.shouldWatchConfig = watch && (typeof configPathOrObject === "string" || Array.isArray(configPathOrObject));
     this.marketplace = marketplace;
   }
-  async initialize(isRestarting) {
+
+  async initialize(isRestarting?: boolean): Promise<void> {
     try {
       await this.configManager.loadConfig();
 
       if (this.shouldWatchConfig && !isRestarting) {
         this.configManager.watchConfig();
-        this.configManager.on("configChanged", async ({ config, changes }) => {
+        this.configManager.on("configChanged", async ({ config, changes }: { config: any; changes: ChangeSet }) => {
           await this.handleConfigUpdated(config, changes);
         });
       }
 
       await this.startConfiguredServers();
-    } catch (error) {
+    } catch (error: any) {
       // Only wrap if it's not already our error type
       if (!(error instanceof ConfigError)) {
         throw wrapError(error, "HUB_INIT_ERROR", {
@@ -42,7 +77,7 @@ export class MCPHub extends EventEmitter {
     }
   }
 
-  async startConfiguredServers() {
+  async startConfiguredServers(): Promise<void> {
     const config = this.configManager.getConfig();
     const servers = Object.entries(config?.mcpServers || {});
     await this.disconnectAll();
@@ -54,7 +89,7 @@ export class MCPHub extends EventEmitter {
       }
     );
     // Create and connect servers in parallel
-    const startPromises = servers.map(async ([name, serverConfig]) => {
+    const startPromises = servers.map(async ([name, serverConfig]: [string, any]): Promise<ServerStartResult> => {
       try {
         if (serverConfig.disabled === true) {
           logger.debug(`Skipping disabled MCP server '${name}'`, {
@@ -71,16 +106,16 @@ export class MCPHub extends EventEmitter {
           this.hubServerUrl,
         );
         ["toolsChanged", "resourcesChanged", "promptsChanged", "notification"].forEach((event) => {
-          connection.on(event, (data) => {
+          connection.on(event, (data: any) => {
             this.emit(event, data);
           });
         });
 
         // Setup dev event handlers
-        connection.on("devServerRestarting", (data) => {
+        connection.on("devServerRestarting", (data: any) => {
           this.emit("devServerRestarting", data);
         });
-        connection.on("devServerRestarted", (data) => {
+        connection.on("devServerRestarted", (data: any) => {
           this.emit("devServerRestarted", data);
         });
 
@@ -92,7 +127,7 @@ export class MCPHub extends EventEmitter {
           status: "success",
           config: serverConfig,
         };
-      } catch (error) {
+      } catch (error: any) {
         const e = wrapError(error);
         logger.error(e.code || "SERVER_START_ERROR", e.message, e.data, false);
 
@@ -121,7 +156,7 @@ export class MCPHub extends EventEmitter {
     });
   }
 
-  async startServer(name) {
+  async startServer(name: string): Promise<any> {
     const config = this.configManager.getConfig();
     const serverConfig = config.mcpServers?.[name];
     if (!serverConfig) {
@@ -138,11 +173,11 @@ export class MCPHub extends EventEmitter {
       serverConfig.disabled = false;
       await this.configManager.updateConfig(config);
     }
-    connection.config = serverConfig
+    connection.config = serverConfig;
     return await connection.start();
   }
 
-  async stopServer(name, disable = false) {
+  async stopServer(name: string, disable: boolean = false): Promise<any> {
     const config = this.configManager.getConfig();
     const serverConfig = config.mcpServers?.[name];
     if (!serverConfig) {
@@ -162,57 +197,56 @@ export class MCPHub extends EventEmitter {
     return await connection.stop(disable);
   }
 
-
-  async handleConfigUpdated(newConfig, changes) {
+  async handleConfigUpdated(newConfig: any, changes: ChangeSet): Promise<void> {
     try {
-      const isSignificant = !!changes ? (changes.added?.length > 0 || changes.removed?.length > 0 || changes.modified?.length > 0) : false
-      this.emit("configChangeDetected", { newConfig, isSignificant })
+      const isSignificant = !!changes ? (changes.added?.length > 0 || changes.removed?.length > 0 || changes.modified?.length > 0) : false;
+      this.emit("configChangeDetected", { newConfig, isSignificant });
       //Even when some error occured on reloading, send the event to clients
       if (!newConfig || !changes) {
-        return
+        return;
       }
       if (!isSignificant) {
-        logger.debug("No significant config changes detected")
+        logger.debug("No significant config changes detected");
         return;
       }
       this.emit("importantConfigChanged", changes);
-      const addPromises = changes.added.map(async (name) => {
+      const addPromises = changes.added.map(async (name: string) => {
         const serverConfig = newConfig.mcpServers[name];
         await this.connectServer(name, serverConfig);
-        logger.info(`Added new server '${name}'`)
-      })
+        logger.info(`Added new server '${name}'`);
+      });
 
-      const removePromises = changes.removed.map(async (name) => {
+      const removePromises = changes.removed.map(async (name: string) => {
         await this.disconnectServer(name);
         this.connections.delete(name); // Clean up the connection
-        logger.info(`Removed server ${name}`)
-      })
+        logger.info(`Removed server ${name}`);
+      });
 
-      const modifiedPromises = changes.modified.map(async (name) => {
+      const modifiedPromises = changes.modified.map(async (name: string) => {
         const serverConfig = newConfig.mcpServers[name];
         const connection = this.connections.get(name);
         if (!!serverConfig.disabled !== !!connection?.disabled) {
           if (serverConfig.disabled) {
-            await this.stopServer(name, true)
-            logger.info(`Server '${name}' disabled`)
+            await this.stopServer(name, true);
+            logger.info(`Server '${name}' disabled`);
           } else {
-            await this.startServer(name, serverConfig);
-            logger.info(`Server '${name}' enabled`)
+            await this.startServer(name);
+            logger.info(`Server '${name}' enabled`);
           }
         } else {
           // For other changes, reconnect with new config
           await this.disconnectServer(name);
           await this.connectServer(name, serverConfig);
-          logger.info(`Updated server '${name}'`)
+          logger.info(`Updated server '${name}'`);
         }
-      })
+      });
       await Promise.allSettled([
         ...addPromises,
         ...removePromises,
         ...modifiedPromises,
-      ])
+      ]);
       this.emit("importantConfigChangeHandled", changes);
-    } catch (error) {
+    } catch (error: any) {
       logger.error(
         error.code || "CONFIG_UPDATE_ERROR",
         error.message || "Error updating configuration",
@@ -221,13 +255,13 @@ export class MCPHub extends EventEmitter {
           changes,
         },
         false
-      )
+      );
       this.emit("importantConfigChangeHandled", changes);
     }
   }
 
-  async connectServer(name, config) {
-    let connection = this.getConnection(name)
+  async connectServer(name: string, config: any): Promise<any> {
+    let connection = this.getConnection(name);
     if (!connection) {
       connection = new MCPConnection(name, config, this.marketplace, this.hubServerUrl);
       this.connections.set(name, connection);
@@ -236,12 +270,12 @@ export class MCPHub extends EventEmitter {
     return connection.getServerInfo();
   }
 
-  async disconnectServer(name) {
+  async disconnectServer(name: string): Promise<void> {
     const connection = this.connections.get(name);
     if (connection) {
       try {
         await connection.disconnect();
-      } catch (error) {
+      } catch (error: any) {
         // Log but don't throw since we're cleaning up
         logger.error(
           "SERVER_DISCONNECT_ERROR",
@@ -256,12 +290,13 @@ export class MCPHub extends EventEmitter {
       // Don't remove from connections map
     }
   }
-  getConnection(server_name) {
+
+  getConnection(server_name: string): MCPConnection | undefined {
     const connection = this.connections.get(server_name);
-    return connection
+    return connection;
   }
 
-  async cleanup() {
+  async cleanup(): Promise<void> {
     logger.info("Starting MCP Hub cleanup");
 
     // Stop config file watching
@@ -276,7 +311,7 @@ export class MCPHub extends EventEmitter {
     logger.info("MCP Hub cleanup completed");
   }
 
-  async disconnectAll() {
+  async disconnectAll(): Promise<void> {
     const serverNames = Array.from(this.connections.keys());
     logger.info(`Disconnecting all servers in parallel`, {
       count: serverNames.length,
@@ -291,7 +326,7 @@ export class MCPHub extends EventEmitter {
       .filter((r) => r.status === "rejected")
       .map((r, i) => ({
         name: serverNames[i],
-        error: r.reason?.message || "Unknown error",
+        error: (r as PromiseRejectedResult).reason?.message || "Unknown error",
       }));
 
     // Log failures
@@ -319,7 +354,7 @@ export class MCPHub extends EventEmitter {
     this.connections.clear();
   }
 
-  getServerStatus(name) {
+  getServerStatus(name: string): any {
     const connection = this.connections.get(name);
     if (!connection) {
       throw new ServerError("Server not found", { server: name });
@@ -327,13 +362,13 @@ export class MCPHub extends EventEmitter {
     return connection.getServerInfo();
   }
 
-  getAllServerStatuses() {
+  getAllServerStatuses(): any[] {
     return Array.from(this.connections.values()).map((connection) =>
       connection.getServerInfo()
     );
   }
 
-  async rawRequest(serverName, ...rest) {
+  async rawRequest(serverName: string, ...rest: any[]): Promise<any> {
     const connection = this.connections.get(serverName);
     if (!connection) {
       throw new ServerError("Server not found", {
@@ -342,7 +377,8 @@ export class MCPHub extends EventEmitter {
     }
     return await connection.raw_request(...rest);
   }
-  async callTool(serverName, toolName, args, request_options) {
+
+  async callTool(serverName: string, toolName: string, args: any, request_options?: any): Promise<any> {
     const connection = this.connections.get(serverName);
     if (!connection) {
       throw new ServerError("Server not found", {
@@ -354,7 +390,7 @@ export class MCPHub extends EventEmitter {
     return await connection.callTool(toolName, args, request_options);
   }
 
-  async readResource(serverName, uri, request_options) {
+  async readResource(serverName: string, uri: string, request_options?: any): Promise<any> {
     const connection = this.connections.get(serverName);
     if (!connection) {
       throw new ServerError("Server not found", {
@@ -366,19 +402,19 @@ export class MCPHub extends EventEmitter {
     return await connection.readResource(uri, request_options);
   }
 
-  async getPrompt(serverName, promtName, args, request_options) {
+  async getPrompt(serverName: string, promptName: string, args: any, request_options?: any): Promise<any> {
     const connection = this.connections.get(serverName);
     if (!connection) {
       throw new ServerError("Server not found", {
         server: serverName,
         operation: "get_prompt",
-        prompt: promtName,
+        prompt: promptName,
       });
     }
-    return await connection.getPrompt(promtName, args, request_options);
+    return await connection.getPrompt(promptName, args, request_options);
   }
 
-  async refreshServer(name) {
+  async refreshServer(name: string): Promise<any> {
     const connection = this.connections.get(name);
     if (!connection) {
       throw new ServerError("Server not found", { server: name });
@@ -389,17 +425,20 @@ export class MCPHub extends EventEmitter {
     return connection.getServerInfo();
   }
 
-  async refreshAllServers() {
+  async refreshAllServers(): Promise<(any | ServerRefreshResult)[]> {
     logger.debug("Refreshing capabilities from all servers");
     const serverNames = Array.from(this.connections.keys());
 
     const results = await Promise.allSettled(
-      serverNames.map(async (name) => {
+      serverNames.map(async (name): Promise<any | ServerRefreshResult> => {
         try {
           const connection = this.connections.get(name);
+          if (!connection) {
+            throw new Error("Connection not found");
+          }
           await connection.updateCapabilities();
           return connection.getServerInfo();
-        } catch (error) {
+        } catch (error: any) {
           logger.error(
             "CAPABILITIES_REFRESH_ERROR",
             `Failed to refresh capabilities for server ${name}`,
@@ -417,7 +456,7 @@ export class MCPHub extends EventEmitter {
         }
       })
     );
-    logger.debug("Refreshed all servers")
+    logger.debug("Refreshed all servers");
 
     return results.map((result) =>
       result.status === "fulfilled" ? result.value : result.reason
@@ -426,4 +465,3 @@ export class MCPHub extends EventEmitter {
 }
 
 export { MCPConnection } from "./MCPConnection.js";
-

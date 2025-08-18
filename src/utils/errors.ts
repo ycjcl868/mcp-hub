@@ -1,9 +1,16 @@
+export interface ErrorData {
+  [key: string]: any;
+}
+
 /**
  * Base error class for MCP Hub errors
  * All errors should extend from this to ensure consistent structure
  */
 export class MCPHubError extends Error {
-  constructor(code, message, data = {}) {
+  public code: string;
+  public data: ErrorData;
+
+  constructor(code: string, message: string, data: ErrorData = {}) {
     super(message);
     this.code = code;
     this.data = data;
@@ -18,7 +25,7 @@ export class MCPHubError extends Error {
   /**
    * Format error for logging
    */
-  toJSON() {
+  toJSON(): { code: string; message: string; data: ErrorData; stack?: string } {
     return {
       code: this.code,
       message: this.message,
@@ -32,7 +39,7 @@ export class MCPHubError extends Error {
  * Configuration related errors
  */
 export class ConfigError extends MCPHubError {
-  constructor(message, data = {}) {
+  constructor(message: string, data: ErrorData = {}) {
     super("CONFIG_ERROR", message, data);
     this.name = "ConfigError";
   }
@@ -42,7 +49,7 @@ export class ConfigError extends MCPHubError {
  * Server connection related errors
  */
 export class ConnectionError extends MCPHubError {
-  constructor(message, data = {}) {
+  constructor(message: string, data: ErrorData = {}) {
     super("CONNECTION_ERROR", message, data);
     this.name = "ConnectionError";
   }
@@ -52,7 +59,7 @@ export class ConnectionError extends MCPHubError {
  * Server startup/initialization errors
  */
 export class ServerError extends MCPHubError {
-  constructor(message, data = {}) {
+  constructor(message: string, data: ErrorData = {}) {
     super("SERVER_ERROR", message, data);
     this.name = "ServerError";
   }
@@ -62,7 +69,7 @@ export class ServerError extends MCPHubError {
  * Tool execution related errors
  */
 export class ToolError extends MCPHubError {
-  constructor(message, data = {}) {
+  constructor(message: string, data: ErrorData = {}) {
     super("TOOL_ERROR", message, data);
     this.name = "ToolError";
   }
@@ -72,7 +79,7 @@ export class ToolError extends MCPHubError {
  * Resource access related errors
  */
 export class ResourceError extends MCPHubError {
-  constructor(message, data = {}) {
+  constructor(message: string, data: ErrorData = {}) {
     super("RESOURCE_ERROR", message, data);
     this.name = "ResourceError";
   }
@@ -82,7 +89,7 @@ export class ResourceError extends MCPHubError {
  * Request validation errors
  */
 export class ValidationError extends MCPHubError {
-  constructor(message, data = {}) {
+  constructor(message: string, data: ErrorData = {}) {
     super("VALIDATION_ERROR", message, data);
     this.name = "ValidationError";
   }
@@ -91,14 +98,14 @@ export class ValidationError extends MCPHubError {
 /**
  * Helper function to determine if error is one of our custom errors
  */
-export function isMCPHubError(error) {
+export function isMCPHubError(error: any): error is MCPHubError {
   return error instanceof MCPHubError;
 }
 
 /**
  * Helper function to wrap unknown errors as MCPHubError
  */
-export function wrapError(error, code = "UNEXPECTED_ERROR", data = {}) {
+export function wrapError(error: any, code: string = "UNEXPECTED_ERROR", data: ErrorData = {}): MCPHubError {
   if (isMCPHubError(error)) {
     return error;
   }

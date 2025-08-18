@@ -7,7 +7,7 @@ import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js";
 import ReconnectingEventSource from "reconnecting-eventsource";
-import MCPHubOAuthProvider from "./utils/oauth-provider.js"
+import MCPHubOAuthProvider from "./utils/oauth-provider.js";
 import {
   ListToolsResultSchema,
   ListResourcesResultSchema,
@@ -20,6 +20,15 @@ import {
   ResourceListChangedNotificationSchema,
   PromptListChangedNotificationSchema,
   ListPromptsResultSchema,
+  Tool,
+  Resource,
+  ResourceTemplate,
+  Prompt,
+  LoggingLevel,
+  RequestOptions,
+  CallToolResult,
+  GetPromptResult,
+  ReadResourceResult,
 } from "@modelcontextprotocol/sdk/types.js";
 import EventEmitter from "events";
 import logger from "./utils/logger.js";
@@ -34,20 +43,181 @@ import {
 import { DevWatcher } from "./utils/dev-watcher.js";
 import { envResolver } from "./utils/env-resolver.js";
 
-const ConnectionStatus = {
+// Connection status enum
+export const ConnectionStatus = {
   CONNECTED: "connected",
   CONNECTING: "connecting",
   DISCONNECTED: "disconnected",
   UNAUTHORIZED: "unauthorized", // New status for OAuth flow
   DISABLED: "disabled"
-};
+} as const;
 
-//When a server is being installed for the first time, it might takes some time to install the dependencies
-const CLIENT_CONNECT_TIMEOUT = 5 * 60000 //5 minutes
+export type ConnectionStatusType = typeof ConnectionStatus[keyof typeof ConnectionStatus];
 
+// When a server is being installed for the first time, it might take some time to install the dependencies
+const CLIENT_CONNECT_TIMEOUT = 5 * 60000; // 5 minutes
+
+// Interface for server configuration
+export interface ServerConfig {
+  type: TransportType;
+  disabled?: boolean;
+  description?: string;
+  name?: string;
+  config_source?: string;
+  dev?: DevConfig;
+  // Stdio-specific properties
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  cwd?: string;
+  // HTTP/SSE-specific properties
+  url?: string;
+  headers?: Record<string, string>;
+}
+
+// Interface for dev configuration
+export interface DevConfig {
+  enabled?: boolean;
+  watch?: string[];
+  cwd: string;
+  debounce?: number;
+}
+
+// Transport types
+export type TransportType = 'stdio' | 'sse' | 'http';
+
+// Interface for marketplace item
+export interface MarketplaceItem {
+  mcpId: string;
+  name?: string;
+  description?: string;
+}
+
+// Interface for marketplace cache
+export interface MarketplaceCache {
+  catalog?: {
+    items?: MarketplaceItem[];
+  };
+}
+
+// Interface for marketplace
+export interface Marketplace {
+  cache?: MarketplaceCache;
+}
+
+// Interface for server info
+export interface ServerInfo {
+  name: string;
+  displayName: string;
+  description: string;
+  transportType: TransportType;
+  status: ConnectionStatusType;
+  error: string | null;
+  capabilities: {
+    tools: Tool[];
+    resources: Resource[];
+    resourceTemplates: ResourceTemplate[];
+    prompts: Prompt[];
+  };
+  uptime: number;
+  lastStarted: string | null;
+  authorizationUrl: string | null;
+  serverInfo: { name: string; version: string } | null;
+  config_source?: string;
+}
+
+// Interface for dev file change data
+export interface DevFileChangeData {
+  relativeFiles: string[];
+  timestamp: string;
+}
+
+// Interface for authorization result
+export interface AuthorizationResult {
+  authorizationUrl: string;
+}
+
+// Interface for transport creation options
+export interface TransportOptions {
+  authProvider?: MCPHubOAuthProvider;
+  requestInit?: {
+    headers?: Record<string, string>;
+  };
+}
+
+// Interface for notification handlers map
+interface NotificationHandlersMap {
+  tools: typeof ToolListChangedNotificationSchema;
+  resources: typeof ResourceListChangedNotificationSchema;
+  prompts: typeof PromptListChangedNotificationSchema;
+}
+
+// Interface for capability methods map
+interface CapabilityMethodsMap {
+  tools: {
+    method: "tools/list";
+    schema: typeof ListToolsResultSchema;
+  };
+  resources: {
+    method: "resources/list";
+    schema: typeof ListResourcesResultSchema;
+  };
+  resourceTemplates: {
+    method: "resources/templates/list";
+    schema: typeof ListResourceTemplatesResultSchema;
+  };
+  prompts: {
+    method: "prompts/list";
+    schema: typeof ListPromptsResultSchema;
+  };
+}
+
+// Interface for logging notification params
+interface LoggingNotificationParams {
+  level?: LoggingLevel;
+  data?: Record<string, any>;
+}
+
+// Interface for logging notification
+interface LoggingNotification {
+  params?: LoggingNotificationParams;
+}
 
 export class MCPConnection extends EventEmitter {
-  constructor(name, config, marketplace, hubServerUrl) {
+  public readonly name: string; // Keep as mcpId
+  public displayName: string;
+  public description: string;
+  public config: ServerConfig;
+  public client: Client | null;
+  public transport: StdioClientTransport | SSEClientTransport | StreamableHTTPClientTransport | null;
+  public readonly transportType: TransportType;
+  public tools: Tool[];
+  public resources: Resource[];
+  public prompts: Prompt[];
+  public resourceTemplates: ResourceTemplate[];
+  public status: ConnectionStatusType;
+  public error: string | null;
+  public startTime: number | null;
+  public lastStarted: string | null;
+  public disabled: boolean;
+  public authorizationUrl: string | null;
+  public readonly hubServerUrl: string;
+  public serverInfo: { name: string; version: string } | null;
+
+  // OAuth state
+  private authProvider: MCPHubOAuthProvider | null;
+  private authCallback: ((code: string) => void) | null;
+  private authCode: string | null;
+
+  // Dev watcher for file changes (stdio servers only)
+  private devWatcher: DevWatcher | null;
+
+  constructor(
+    name: string,
+    config: ServerConfig,
+    marketplace?: Marketplace,
+    hubServerUrl?: string
+  ) {
     super();
     this.name = name; // Keep as mcpId
 
@@ -61,14 +231,14 @@ export class MCPConnection extends EventEmitter {
 
     // Set display name from marketplace
     this.displayName = name; // Default to mcpId
-    let serverDescription = ""
+    let serverDescription = "";
     if (marketplace?.cache?.catalog?.items) {
       const item = marketplace.cache.catalog.items.find(
         (item) => item.mcpId === name
       );
       if (item?.name) {
         this.displayName = item.name;
-        serverDescription = item.description || ""
+        serverDescription = item.description || "";
         logger.debug(`Using marketplace name for server '${name}'`, {
           name,
           displayName: item.name,
@@ -76,7 +246,7 @@ export class MCPConnection extends EventEmitter {
       }
     }
     this.config = config;
-    this.description = config.description ? config.description : serverDescription
+    this.description = config.description ? config.description : serverDescription;
     this.client = null;
     this.transport = null;
     this.transportType = config.type; // Store the transport type from config
@@ -90,17 +260,17 @@ export class MCPConnection extends EventEmitter {
     this.lastStarted = null;
     this.disabled = config.disabled || false;
     this.authorizationUrl = null;
-    this.hubServerUrl = hubServerUrl;
+    this.hubServerUrl = hubServerUrl || "";
     this.serverInfo = null; // Will store server's reported name/version
 
     // Initialize dev watcher for stdio servers with dev config
     if (this.transportType === 'stdio' && config.dev) {
       this.devWatcher = new DevWatcher(this.name, config.dev);
-      this.devWatcher.on('filesChanged', (data) => this.#handleDevFilesChanged(data));
+      this.devWatcher.on('filesChanged', (data: DevFileChangeData) => this.#handleDevFilesChanged(data));
     }
   }
 
-  async start() {
+  async start(): Promise<ServerInfo> {
     // If disabled, enable it
     if (this.disabled) {
       this.disabled = false;
@@ -117,35 +287,32 @@ export class MCPConnection extends EventEmitter {
     return this.getServerInfo();
   }
 
-  async stop(disable = false) {
+  async stop(disable: boolean = false): Promise<ServerInfo> {
     if (disable) {
       this.disabled = true;
       this.config.disabled = true;
       this.status = ConnectionStatus.DISABLED;
     }
 
-    // if (this.status !== "disconnected") {
     await this.disconnect();
-    // }
-
     return this.getServerInfo();
   }
 
   // Calculate uptime in seconds
-  getUptime() {
+  getUptime(): number {
     if (!this.startTime || ![ConnectionStatus.CONNECTED, ConnectionStatus.DISABLED].includes(this.status)) {
       return 0;
     }
     return Math.floor((Date.now() - this.startTime) / 1000);
   }
 
-  async connect(config) {
+  async connect(config?: ServerConfig): Promise<void> {
     try {
       if (config) {
-        this.config = config
+        this.config = config;
       }
       if (this.config?.name) {
-        this.displayName = this.config.name
+        this.displayName = this.config.name;
       }
       if (this.disabled) {
         this.status = ConnectionStatus.DISABLED;
@@ -172,45 +339,44 @@ export class MCPConnection extends EventEmitter {
             timeout: CLIENT_CONNECT_TIMEOUT
           });
         } else {
-          //First try the new http transport with fallback to deprecated sse transport
+          // First try the new http transport with fallback to deprecated sse transport
           try {
-            this.authProvider = this._createOAuthProvider()
-            this.transport = await this._createStreambleHTTPTransport(this.authProvider, resolvedConfig)
+            this.authProvider = this._createOAuthProvider();
+            this.transport = await this._createStreamableHTTPTransport(this.authProvider, resolvedConfig);
             this.client = this._createClient();
             await this.client.connect(this.transport, {
               timeout: CLIENT_CONNECT_TIMEOUT
             });
-          } catch (httpError) {
+          } catch (httpError: any) {
             try {
-              //catches 401 error from http transport
+              // catches 401 error from http transport
               if (this._isAuthError(httpError)) {
                 logger.debug(`'${this.name}' streamable-http transport needs authorization: ${httpError.message}`);
-                return this._handleUnauthorizedConnection()
+                return this._handleUnauthorizedConnection();
               } else {
                 logger.debug(`'${this.name}' streamable-http error: ${httpError.message}. Falling back to SSE transport`);
-                this.authProvider = this._createOAuthProvider()
+                this.authProvider = this._createOAuthProvider();
                 this.transport = await this._createSSETransport(this.authProvider, resolvedConfig);
                 this.client = this._createClient();
                 await this.client.connect(this.transport, {
                   timeout: CLIENT_CONNECT_TIMEOUT
                 });
               }
-            } catch (sseError) {
-
-              //catches 401 error from sse transport
+            } catch (sseError: any) {
+              // catches 401 error from sse transport
               if (this._isAuthError(sseError)) {
                 logger.debug(`'${this.name}' SSE transport needs authorization: ${sseError.message}`);
-                return this._handleUnauthorizedConnection()
+                return this._handleUnauthorizedConnection();
               } else {
                 logger.debug(`'${this.name}' failed to start connection with http and sse transports: ${sseError.message}`);
-                throw sseError
+                throw sseError;
               }
             }
           }
         }
-      } catch (error) {
+      } catch (error: any) {
         logger.debug(`'${this.name}' failed to start connection: ${error.message}`);
-        throw error
+        throw error;
       }
 
       // Fetch server info and initial capabilities before marking as connected
@@ -231,7 +397,7 @@ export class MCPConnection extends EventEmitter {
       }
 
       logger.info(`'${this.name}' MCP server connected`);
-    } catch (error) {
+    } catch (error: any) {
       // Ensure proper cleanup on error
       await this.disconnect(error.message);
       throw new ConnectionError(
@@ -244,57 +410,59 @@ export class MCPConnection extends EventEmitter {
     }
   }
 
-  removeNotificationHandlers() {
-    if (!this.client) return
+  removeNotificationHandlers(): void {
+    if (!this.client) return;
     // Remove all notification handlers
     // For some reason removeNotificationHandlers doesn't seem to work 
     // so we are setting them to nothing
-    const nothing = () => { };
-    this.client.setNotificationHandler(ToolListChangedNotificationSchema, nothing)
-    this.client.setNotificationHandler(ResourceListChangedNotificationSchema, nothing)
-    this.client.setNotificationHandler(PromptListChangedNotificationSchema, nothing)
-    this.client.setNotificationHandler(LoggingMessageNotificationSchema, nothing)
+    const nothing = (): void => { };
+    this.client.setNotificationHandler(ToolListChangedNotificationSchema, nothing);
+    this.client.setNotificationHandler(ResourceListChangedNotificationSchema, nothing);
+    this.client.setNotificationHandler(PromptListChangedNotificationSchema, nothing);
+    this.client.setNotificationHandler(LoggingMessageNotificationSchema, nothing);
   }
 
-  setupNotificationHandlers() {
-    if (!this.client) return
+  setupNotificationHandlers(): void {
+    if (!this.client) return;
 
     // Handle general logging messages
     this.client.setNotificationHandler(
       LoggingMessageNotificationSchema,
-      (notification) => {
-        let params = notification.params || {}
-        let data = params.data || {}
-        let level = params.level || "debug"
+      (notification: LoggingNotification) => {
+        const params = notification.params || {};
+        const data = params.data || {};
+        const level = params.level || "debug";
         logger.debug(`["${this.name}" server ${level} log]: ${JSON.stringify(data, null, 2)}`);
       }
     );
-    const map = {
+
+    const map: NotificationHandlersMap = {
       "tools": ToolListChangedNotificationSchema,
       "resources": ResourceListChangedNotificationSchema,
       "prompts": PromptListChangedNotificationSchema,
-    }
+    };
+
     // Handle tool list changes
-    Object.keys(map).forEach(type => {
-      this.client.setNotificationHandler(map[type], async () => {
-        logger.debug(`Received ${type}Changed notification`)
-        await this.updateCapabilities(type === "resources" ? ["resources", "resourceTemplates"] : [type]);
+    Object.keys(map).forEach((type) => {
+      const typedType = type as keyof NotificationHandlersMap;
+      this.client!.setNotificationHandler(map[typedType], async () => {
+        logger.debug(`Received ${type}Changed notification`);
+        await this.updateCapabilities(type === "resources" ? ["resources", "resourceTemplates"] : [typedType]);
         const updatedData = type === "resources" ? {
           resources: this.resources,
           resourceTemplates: this.resourceTemplates,
         } : {
-          [type]: this[type],
-        }
+          [type]: this[typedType],
+        };
         this.emit(`${type}Changed`, {
           server: this.name,
           ...updatedData,
-        })
-      })
-    })
+        });
+      });
+    });
   }
 
-
-  async fetchServerInfo() {
+  async fetchServerInfo(): Promise<void> {
     if (!this.client) {
       return;
     }
@@ -302,28 +470,29 @@ export class MCPConnection extends EventEmitter {
     try {
       // Get server info from the connected server
       this.serverInfo = this.client.getServerVersion();
-    } catch (error) {
+    } catch (error: any) {
       logger.debug(`Could not fetch server info for '${this.name}': ${error.message}`);
       this.serverInfo = null;
     }
   }
 
-  async updateCapabilities(capabilitiesToUpdate) {
-    //skip for disabled servers
+  async updateCapabilities(capabilitiesToUpdate?: string[]): Promise<void> {
+    // skip for disabled servers
     if (!this.client) {
       return;
     }
     // Helper function to safely request capabilities
-    const safeRequest = async (method, schema) => {
+    const safeRequest = async (method: string, schema: any): Promise<any> => {
       try {
-        const response = await this.client.request({ method }, schema);
+        const response = await this.client!.request({ method }, schema);
         return response;
-      } catch (error) {
+      } catch (error: any) {
         // logger.debug( `Server '${this.name}' does not support capability '${method}'`);
         return null;
       }
     };
-    const map = {
+
+    const map: CapabilityMethodsMap = {
       tools: {
         method: "tools/list",
         schema: ListToolsResultSchema,
@@ -340,16 +509,18 @@ export class MCPConnection extends EventEmitter {
         method: "prompts/list",
         schema: ListPromptsResultSchema,
       }
-    }
+    };
 
     try {
       const typesToFetch = capabilitiesToUpdate || Object.keys(map);
       const fetchPromises = typesToFetch.map(async (type) => {
-        this[type] = (await safeRequest(map[type].method, map[type].schema))?.[type] || [];
+        const typedType = type as keyof CapabilityMethodsMap;
+        const result = await safeRequest(map[typedType].method, map[typedType].schema);
+        (this as any)[type] = result?.[type] || [];
       });
       await Promise.all(fetchPromises);
       //TODO: handle pagination
-    } catch (error) {
+    } catch (error: any) {
       // Only log as warning since missing capabilities are expected in some cases
       logger.warn(`Error updating capabilities for server '${this.name}'`, {
         server: this.name,
@@ -358,7 +529,7 @@ export class MCPConnection extends EventEmitter {
     }
   }
 
-  async raw_request(...args) {
+  async raw_request(...args: any[]): Promise<any> {
     if (!this.client) {
       throw new ToolError("Server not initialized", {
         server: this.name,
@@ -373,15 +544,18 @@ export class MCPConnection extends EventEmitter {
 
     try {
       return await this.client.request(...args);
-    } catch (error) {
+    } catch (error: any) {
       throw wrapError(error, "RAW_REQUEST_ERROR", {
         server: this.name,
       });
     }
   }
 
-
-  async getPrompt(promptName, args, request_options) {
+  async getPrompt(
+    promptName: string,
+    args?: Record<string, any> | any[],
+    request_options?: RequestOptions
+  ): Promise<GetPromptResult> {
     if (!this.client) {
       throw new ToolError("Server not initialized", {
         server: this.name,
@@ -404,7 +578,7 @@ export class MCPConnection extends EventEmitter {
         availablePrompts: this.prompts.map((p) => p.name),
       });
     }
-    //check args, it should be either a list or an object or null
+    // check args, it should be either a list or an object or null
     if (args && !Array.isArray(args) && typeof args !== "object") {
       throw new ToolError("Invalid arguments", {
         server: this.name,
@@ -414,21 +588,19 @@ export class MCPConnection extends EventEmitter {
     }
 
     try {
-
       return await this.client.request({
         method: "prompts/get", params: {
           name: promptName,
           arguments: args
         }
       }, GetPromptResultSchema, request_options);
-    } catch (error) {
+    } catch (error: any) {
       throw wrapError(error, "PROMPT_EXECUTION_ERROR", {
         server: this.name,
         prompt: promptName,
         args,
       });
     }
-
   }
 
   /*
@@ -440,7 +612,11 @@ export class MCPConnection extends EventEmitter {
     | Binary Resource     | `{ "content": [{ "type": "resource", "resource": { "uri": "image.jpg", "blob": "base64data...", "mimeType": "image/jpeg" } }], "isError": false }` |
     | Error Case          | `{ "content": [], "isError": true }` (Note: Error details might be in JSON-RPC level) |
     */
-  async callTool(toolName, args, request_options) {
+  async callTool(
+    toolName: string,
+    args?: Record<string, any> | any[],
+    request_options?: RequestOptions
+  ): Promise<CallToolResult> {
     if (!this.client) {
       throw new ToolError("Server not initialized", {
         server: this.name,
@@ -465,7 +641,7 @@ export class MCPConnection extends EventEmitter {
       });
     }
 
-    //check args, it should be either a list or an object or null
+    // check args, it should be either a list or an object or null
     if (args && !Array.isArray(args) && typeof args !== "object") {
       throw new ToolError("Invalid arguments", {
         server: this.name,
@@ -486,7 +662,7 @@ export class MCPConnection extends EventEmitter {
         CallToolResultSchema,
         request_options
       );
-    } catch (error) {
+    } catch (error: any) {
       throw wrapError(error, "TOOL_EXECUTION_ERROR", {
         server: this.name,
         tool: toolName,
@@ -504,8 +680,7 @@ export class MCPConnection extends EventEmitter {
     | Multiple Resources           | `{ "contents": [{ "uri": "file1.txt", "text": "Content of file1" }, { "uri": "file2.png", "blob": "base64encodeddata..." }] }` |
     | No Resources (empty)         | `{ "contents": [] }`                                                             |
   */
-
-  async readResource(uri, request_options) {
+  async readResource(uri: string, request_options?: RequestOptions): Promise<ReadResourceResult> {
     if (!this.client) {
       throw new ResourceError("Server not initialized", {
         server: this.name,
@@ -547,7 +722,7 @@ export class MCPConnection extends EventEmitter {
         ReadResourceResultSchema,
         request_options
       );
-    } catch (error) {
+    } catch (error: any) {
       throw wrapError(error, "RESOURCE_READ_ERROR", {
         server: this.name,
         uri,
@@ -555,9 +730,7 @@ export class MCPConnection extends EventEmitter {
     }
   }
 
-
-
-  async resetState(error) {
+  async resetState(error?: string): Promise<void> {
     this.client = null;
     this.transport = null;
     this.tools = [];
@@ -574,7 +747,7 @@ export class MCPConnection extends EventEmitter {
     this.serverInfo = null;
   }
 
-  async disconnect(error) {
+  async disconnect(error?: string): Promise<void> {
     this.removeNotificationHandlers();
 
     // Stop dev watcher
@@ -584,61 +757,60 @@ export class MCPConnection extends EventEmitter {
 
     if (this.transport) {
       // First try to terminate the session gracefully
-      if (this.transport.sessionId) {
+      if ((this.transport as any).sessionId) {
         try {
           logger.debug(`'${this.name}': Terminating session before exit...`);
-          await transport.terminateSession();
+          await (this.transport as any).terminateSession();
         }
-        catch (error) {
-          logger.debug(`'${this.name}': Error terminating session: ${error.message}`)
+        catch (error: any) {
+          logger.debug(`'${this.name}': Error terminating session: ${error.message}`);
         }
       }
       await this.transport.close();
     }
-    this.resetState(error);
+    await this.resetState(error);
   }
 
   // Create OAuth provider with proper metadata and storage
-  _createOAuthProvider() {
+  private _createOAuthProvider(): MCPHubOAuthProvider {
     return new MCPHubOAuthProvider({
       serverName: this.name,
-      serverUrl: this.config.url,
+      serverUrl: this.config.url!,
       hubServerUrl: this.hubServerUrl
-    })
+    });
   }
 
-  async authorize() {
+  async authorize(): Promise<AuthorizationResult> {
     if (!this.authorizationUrl) {
       throw new Error(`No authorization URL available for server '${this.name}'`);
     }
-    //validate
-    new URL(this.authorizationUrl)
+    // validate
+    new URL(this.authorizationUrl);
     // log it in cases where the user in a browserless environment
     logger.info(`Opening authorization URL for server '${this.name}': ${this.authorizationUrl.toString()}`);
     // Open the authorization URL in the default browser 
-    await open(this.authorizationUrl.toString())
-    //Once the user authorizes, handleAuthCallback is called.
+    await open(this.authorizationUrl.toString());
+    // Once the user authorizes, handleAuthCallback is called.
     return {
       authorizationUrl: this.authorizationUrl,
-    }
+    };
   }
 
-  async reconnect() {
+  async reconnect(): Promise<void> {
     if (this.client) {
       await this.disconnect();
     }
     await this.connect();
   }
 
-
-  async handleAuthCallback(code) {
+  async handleAuthCallback(code: string): Promise<void> {
     logger.debug(`Handling OAuth callback for server '${this.name}'`);
-    await this.transport.finishAuth(code);
+    await (this.transport as any).finishAuth(code);
     logger.debug(`Successful code exchange for '${this.name}': Authorized, connecting with new tokens`);
-    await this.connect()
+    await this.connect();
   }
 
-  getServerInfo() {
+  getServerInfo(): ServerInfo {
     return {
       name: this.name, // Original mcpId
       displayName: this.displayName, // Friendly name from marketplace
@@ -660,8 +832,7 @@ export class MCPConnection extends EventEmitter {
     };
   }
 
-  async _createStdioTransport(resolvedConfig) {
-
+  private async _createStdioTransport(resolvedConfig: ServerConfig): Promise<StdioClientTransport> {
     // Build serverEnv with resolved values
     const serverEnv = {
       // INFO: getDefaultEnvironment is imp in order to start mcp servers properly
@@ -671,26 +842,27 @@ export class MCPConnection extends EventEmitter {
 
     const transport = new StdioClientTransport({
       cwd: resolvedConfig.cwd,
-      command: resolvedConfig.command, // Now supports ${} placeholders too!
+      command: resolvedConfig.command!, // Now supports ${} placeholders too!
       args: resolvedConfig.args,       // Supports both ${} and legacy $VAR
       env: serverEnv,
       stderr: 'pipe',
     });
 
-    //listen to stderr for stdio servers
+    // listen to stderr for stdio servers
     const stderrStream = transport.stderr;
     if (stderrStream) {
-      stderrStream.on("data", (data) => {
+      stderrStream.on("data", (data: Buffer) => {
         const errorOutput = data.toString().trim();
-        logger.warn(`${this.name} stderr: ${errorOutput}`)
+        logger.warn(`${this.name} stderr: ${errorOutput}`);
       });
     }
-    return transport
+    return transport;
   }
 
-
-  async _createStreambleHTTPTransport(authProvider, resolvedConfig) {
-
+  private async _createStreamableHTTPTransport(
+    authProvider: MCPHubOAuthProvider,
+    resolvedConfig: ServerConfig
+  ): Promise<StreamableHTTPClientTransport> {
     const options = {
       authProvider,
       requestInit: {
@@ -698,31 +870,33 @@ export class MCPConnection extends EventEmitter {
       },
       // reconnectionOptions?: StreamableHTTPReconnectionOptions
       // sessionId?: string;
-    }
-    const transport = new StreamableHTTPClientTransport(new URL(resolvedConfig.url), options);
-    return transport
+    };
+    const transport = new StreamableHTTPClientTransport(new URL(resolvedConfig.url!), options);
+    return transport;
   }
 
-  async _createSSETransport(authProvider, resolvedConfig) {
-
+  private async _createSSETransport(
+    authProvider: MCPHubOAuthProvider,
+    resolvedConfig: ServerConfig
+  ): Promise<SSEClientTransport> {
     // SSE transport setup with reconnection support
     const reconnectingEventSourceOptions = {
       max_retry_time: 5000, // Maximum time between retries (5 seconds)
       // withCredentials: resolvedConfig.headers?.["Authorization"] ? true : false,
     };
 
-    //HACK: sending reconnectingEventSourceOptions in the SSEClientTransport needs us to create custom fetch function with headers created from authProvider tokens. This way we can use ReconnectingEventSource with necessary options
+    // HACK: sending reconnectingEventSourceOptions in the SSEClientTransport needs us to create custom fetch function with headers created from authProvider tokens. This way we can use ReconnectingEventSource with necessary options
     class ReconnectingES extends ReconnectingEventSource {
-      constructor(url, options) {
+      constructor(url: string | URL, options?: any) {
         super(url, {
           ...options || {},
           ...reconnectingEventSourceOptions
-        })
+        });
       }
     }
     // Use ReconnectingEventSource for automatic reconnection
-    global.EventSource = ReconnectingES
-    const transport = new SSEClientTransport(new URL(resolvedConfig.url), {
+    (global as any).EventSource = ReconnectingES;
+    const transport = new SSEClientTransport(new URL(resolvedConfig.url!), {
       requestInit: {
         headers: resolvedConfig.headers, // Already resolved with commands support
       },
@@ -730,10 +904,10 @@ export class MCPConnection extends EventEmitter {
       // INFO:: giving eventSourceInit leading to infinite loop, not needed anymore with global ReconnectingES
       // eventSourceInit: reconnectingEventSourceOptions
     });
-    return transport
+    return transport;
   }
 
-  _createClient() {
+  private _createClient(): Client {
     const client = new Client(
       {
         name: "mcp-hub",
@@ -743,15 +917,15 @@ export class MCPConnection extends EventEmitter {
         capabilities: {},
       }
     );
-    client.onerror = (error) => {
+    client.onerror = (error: Error) => {
       // logger.error("CLIENT_ERROR", `${this.name}: client error: ${error.message}`, {}, false);
-      //INFO: onerror is being called for even minor errors, so debug seems more appropriate
-      logger.debug(`'${this.name}' error: ${error.message}`)
+      // INFO: onerror is being called for even minor errors, so debug seems more appropriate
+      logger.debug(`'${this.name}' error: ${error.message}`);
     };
 
     client.onclose = () => {
-      logger.debug(`'${this.name}' transport closed`)
-      //This is causing a bug where in the frontend the server is shown as disconnected when we try disconnect() which sets to disconnected and again connect() which sets to connecting. Having this here negated the connecting status.
+      logger.debug(`'${this.name}' transport closed`);
+      // This is causing a bug where in the frontend the server is shown as disconnected when we try disconnect() which sets to disconnected and again connect() which sets to connecting. Having this here negated the connecting status.
       // this.status = [ConnectionStatus.DISCONNECTED, ConnectionStatus.DISABLED].includes(this.status) ? this.status : ConnectionStatus.DISCONNECTED;
       this.startTime = null;
       // Emit close event for handling reconnection if needed
@@ -760,26 +934,26 @@ export class MCPConnection extends EventEmitter {
         type: this.transportType
       });
     };
-    return client
+    return client;
   }
 
-  _isAuthError(error) {
-    return error.code === 401 || error instanceof UnauthorizedError
+  private _isAuthError(error: any): boolean {
+    return error.code === 401 || error instanceof UnauthorizedError;
   }
 
-  _handleUnauthorizedConnection() {
+  private _handleUnauthorizedConnection(): void {
     logger.warn(`Server '${this.name}' requires authorization`);
     this.status = ConnectionStatus.UNAUTHORIZED;
-    //our custom oauth provider stores auth url generated from redirecthandler rather than opening url  right away
-    this.authorizationUrl = this.authProvider.generatedAuthUrl;
+    // our custom oauth provider stores auth url generated from redirecthandler rather than opening url  right away
+    this.authorizationUrl = (this.authProvider as any)?.generatedAuthUrl;
     if (!this.authorizationUrl) {
       logger.warn(`No authorization URL available for server '${this.name}'`);
     }
   }
 
-  async #handleDevFilesChanged(data) {
+  async #handleDevFilesChanged(data: DevFileChangeData): Promise<void> {
     try {
-      logger.debug(`Dev file changes detected, restarting server '${this.name}'`)
+      logger.debug(`Dev file changes detected, restarting server '${this.name}'`);
 
       // Emit dev restart starting event
       this.emit('devServerRestarting', {
@@ -799,7 +973,7 @@ export class MCPConnection extends EventEmitter {
         newCapabilities: this.getServerInfo().capabilities,
       });
       logger.debug(`Dev restart completed for server '${this.name}'`);
-    } catch (error) {
+    } catch (error: any) {
       logger.error(
         'DEV_RESTART_ERROR',
         `Failed to restart server '${this.name}' after file changes: ${error.message}`,
@@ -821,7 +995,7 @@ export class MCPConnection extends EventEmitter {
     }
   }
 
-  async restartForDev() {
+  async restartForDev(): Promise<void> {
     // Store current config and dev watcher before reset
     const currentConfig = this.config;
     const devWatcher = this.devWatcher; // Preserve dev watcher

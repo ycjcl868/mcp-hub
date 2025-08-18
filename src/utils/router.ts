@@ -1,7 +1,23 @@
 import express from "express";
 
+interface RouteInfo {
+  method: string;
+  path: string;
+  description: string;
+}
+
+interface ServerStatus {
+  name: string;
+  status: string;
+  [key: string]: any;
+}
+
+type ServerStatuses = Record<string, ServerStatus>;
+
+type RequestHandler = (req: express.Request, res: express.Response, next: express.NextFunction) => any;
+
 // Store registered routes for documentation
-const routes = [];
+const routes: RouteInfo[] = [];
 
 // Create router instance
 const router = express.Router();
@@ -13,7 +29,7 @@ const router = express.Router();
  * @param {string} description - Route description
  * @param {function} handler - Route handler function
  */
-function registerRoute(method, path, description, handler) {
+function registerRoute(method: string, path: string, description: string, handler: RequestHandler): void {
   // Add to documentation
   routes.push({
     method,
@@ -22,7 +38,7 @@ function registerRoute(method, path, description, handler) {
   });
 
   // Register actual route with error handling wrapper
-  router[method.toLowerCase()](path, (req, res, next) => {
+  (router as any)[method.toLowerCase()](path, (req: express.Request, res: express.Response, next: express.NextFunction) => {
     Promise.resolve(handler(req, res, next)).catch(next);
   });
 }
@@ -33,7 +49,7 @@ function registerRoute(method, path, description, handler) {
  * @param {Object} serverStatuses - Connected server statuses
  * @returns {string}
  */
-function generateStartupMessage(port, serverStatuses) {
+function generateStartupMessage(port: number, serverStatuses: ServerStatuses): string {
   const connectedServers = Object.values(serverStatuses).filter(
     (s) => s.status === "connected"
   );

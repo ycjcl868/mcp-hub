@@ -11,6 +11,14 @@ import {
 import { fileURLToPath } from "url";
 import { join } from "path";
 
+interface ServerOptions {
+  port: number;
+  config: string[];
+  watch: boolean;
+  autoShutdown: boolean;
+  shutdownDelay: number;
+}
+
 // VERSION will be injected from package.json during build
 /* global process.env.VERSION */
 
@@ -29,7 +37,7 @@ if (process.env.NODE_ENV != "production") {
 }
 
 // Custom failure handler for yargs
-function handleParseError(msg, err) {
+function handleParseError(msg: string, err?: Error): void {
   // Ensure CLI parsing errors exit immediately with proper code
   logger.error(
     "CLI_ARGS_ERROR",
@@ -45,7 +53,7 @@ function handleParseError(msg, err) {
 }
 
 
-async function run() {
+async function run(): Promise<void> {
   const argv = yargs(hideBin(process.argv))
     .usage("Usage: mcp-hub [options]")
     .version(process.env.VERSION || "v0.0.0")
@@ -92,7 +100,7 @@ async function run() {
       watch: argv.watch,
       autoShutdown: argv["auto-shutdown"],
       shutdownDelay: argv["shutdown-delay"],
-    });
+    } as ServerOptions);
   } catch (error) {
     process.exit(1)
   }

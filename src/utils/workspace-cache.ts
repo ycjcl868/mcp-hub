@@ -5,12 +5,44 @@ import logger from './logger.js';
 import chokidar from 'chokidar';
 import { EventEmitter } from 'events';
 
+interface WorkspaceCacheOptions {
+  port?: number;
+}
+
+interface WorkspaceEntry {
+  cwd: string;
+  config_files: string[];
+  pid: number;
+  port: number;
+  startTime: string;
+  state: 'active' | 'shutting_down';
+  activeConnections: number;
+  shutdownStartedAt: string | null;
+  shutdownDelay: number | null;
+}
+
+type WorkspaceCache = Record<string, WorkspaceEntry>;
+
+interface WorkspaceUpdates {
+  state?: 'active' | 'shutting_down';
+  shutdownStartedAt?: string | null;
+  shutdownDelay?: number | null;
+  activeConnections?: number;
+  [key: string]: any;
+}
+
 /**
  * Manages the global workspace cache file that tracks active mcp-hub instances
  * across all workspaces on the system.
  */
 export class WorkspaceCacheManager extends EventEmitter {
-  constructor(options = {}) {
+  private cacheFilePath: string;
+  private lockFilePath: string;
+  private watcher: chokidar.FSWatcher | null;
+  private isWatching: boolean;
+  private port: number | null;
+
+  constructor(options: WorkspaceCacheOptions = {}) {
     super();
     this.cacheFilePath = path.join(getXDGDirectory('state'), 'workspaces.json');
     this.lockFilePath = this.cacheFilePath + '.lock';
@@ -22,7 +54,7 @@ export class WorkspaceCacheManager extends EventEmitter {
   /**
    * Get the current workspace key (port as string)
    */
-  getWorkspaceKey() {
+  getWorkspaceKey(): string | null {
     return this.port ? this.port.toString() : null;
   }
 
@@ -54,7 +86,7 @@ export class WorkspaceCacheManager extends EventEmitter {
   /**
    * Register this hub instance in the workspace cache
    */
-  async register(port, configFiles = []) {
+  async register(port: number, configFiles: string[] = []): Promise<void> {
     // Update our port reference
     this.port = port;
     const workspaceKey = this.getWorkspaceKey();
@@ -63,7 +95,7 @@ export class WorkspaceCacheManager extends EventEmitter {
       throw new Error('Cannot register workspace: no port specified');
     }
 
-    const entry = {
+    const entry: WorkspaceEntry = {
       cwd: process.cwd(),
       config_files: configFiles,
       pid: process.pid,
@@ -100,7 +132,7 @@ export class WorkspaceCacheManager extends EventEmitter {
   /**
    * Deregister this hub instance from the workspace cache
    */
-  async deregister() {
+  async deregister(): Promise<void> {
     const workspaceKey = this.getWorkspaceKey();
 
     if (!workspaceKey) {
@@ -133,7 +165,7 @@ export class WorkspaceCacheManager extends EventEmitter {
   /**
    * Start watching the cache file for changes
    */
-  async startWatching() {
+  async startWatching(): Promise<void> {
     if (this.isWatching) {
       return;
     }
@@ -181,7 +213,7 @@ export class WorkspaceCacheManager extends EventEmitter {
   /**
    * Stop watching the cache file
    */
-  async stopWatching() {
+  async stopWatching(): Promise<void> {
     if (!this.isWatching || !this.watcher) {
       return;
     }
@@ -201,7 +233,7 @@ export class WorkspaceCacheManager extends EventEmitter {
   /**
    * Get all active workspaces from the cache
    */
-  async getActiveWorkspaces() {
+  async getActiveWorkspaces(): Promise<WorkspaceCache> {
     try {
       return await this._readCache();
     } catch (error) {
@@ -215,7 +247,7 @@ export class WorkspaceCacheManager extends EventEmitter {
   /**
    * Clean up stale entries (where the process is no longer running)
    */
-  async cleanupStaleEntries() {
+  async cleanupStaleEntries(): Promise<void> {
     try {
       await this._withLock(async () => {
         const cache = await this._readCache();
@@ -246,7 +278,7 @@ export class WorkspaceCacheManager extends EventEmitter {
   /**
    * Update workspace state in the cache
    */
-  async updateWorkspaceState(port, updates) {
+  async updateWorkspaceState(port: number, updates: WorkspaceUpdates): Promise<void> {
     const workspaceKey = port.toString();
 
     try {
@@ -275,7 +307,7 @@ export class WorkspaceCacheManager extends EventEmitter {
   /**
    * Mark workspace as shutting down
    */
-  async setShutdownTimer(port, shutdownDelay) {
+  async setShutdownTimer(port: number, shutdownDelay: number): Promise<void> {
     await this.updateWorkspaceState(port, {
       state: 'shutting_down',
       shutdownStartedAt: new Date().toISOString(),
@@ -292,7 +324,7 @@ export class WorkspaceCacheManager extends EventEmitter {
   /**
    * Cancel shutdown timer and return to active state
    */
-  async cancelShutdownTimer(port) {
+  async cancelShutdownTimer(port: number): Promise<void> {
     await this.updateWorkspaceState(port, {
       state: 'active',
       shutdownStartedAt: null,
@@ -307,7 +339,7 @@ export class WorkspaceCacheManager extends EventEmitter {
   /**
    * Update active connections count
    */
-  async updateActiveConnections(port, connectionCount) {
+  async updateActiveConnections(port: number, connectionCount: number): Promise<void> {
     await this.updateWorkspaceState(port, {
       activeConnections: connectionCount
     });
@@ -316,7 +348,7 @@ export class WorkspaceCacheManager extends EventEmitter {
   /**
    * Shutdown the cache manager
    */
-  async shutdown() {
+  async shutdown(): Promise<void> {
     await this.stopWatching();
     await this.deregister();
     this.removeAllListeners();
@@ -328,7 +360,7 @@ export class WorkspaceCacheManager extends EventEmitter {
   /**
    * Ensure the cache file exists, creating an empty one if necessary
    */
-  async _ensureCacheFile() {
+  private async _ensureCacheFile(): Promise<void> {
     try {
       await fs.access(this.cacheFilePath);
     } catch (error) {
@@ -343,7 +375,7 @@ export class WorkspaceCacheManager extends EventEmitter {
   /**
    * Read the workspace cache from disk
    */
-  async _readCache() {
+  private async _readCache(): Promise<WorkspaceCache> {
     try {
       const content = await fs.readFile(this.cacheFilePath, 'utf8');
       return JSON.parse(content || '{}');
@@ -358,7 +390,7 @@ export class WorkspaceCacheManager extends EventEmitter {
   /**
    * Write the workspace cache to disk
    */
-  async _writeCache(cache) {
+  private async _writeCache(cache: WorkspaceCache): Promise<void> {
     const content = JSON.stringify(cache, null, 2);
     await fs.writeFile(this.cacheFilePath, content, 'utf8');
   }
@@ -366,7 +398,7 @@ export class WorkspaceCacheManager extends EventEmitter {
   /**
    * Execute a function with file locking to prevent race conditions
    */
-  async _withLock(fn) {
+  private async _withLock(fn: () => Promise<void>): Promise<void> {
     const maxRetries = 10;
     const retryDelay = 50; // ms
 
@@ -402,7 +434,7 @@ export class WorkspaceCacheManager extends EventEmitter {
   /**
    * Check if a process is still running
    */
-  async _isProcessRunning(pid) {
+  private async _isProcessRunning(pid: number): Promise<boolean> {
     try {
       // Sending signal 0 checks if process exists without actually sending a signal
       process.kill(pid, 0);

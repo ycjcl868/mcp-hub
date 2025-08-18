@@ -3,8 +3,44 @@ import { EventEmitter } from "events";
 import logger from "./logger.js";
 import path from "path";
 
+interface DevConfig {
+  enabled?: boolean;
+  watch?: string[];
+  cwd: string;
+  debounce?: number;
+}
+
+interface NormalizedDevConfig {
+  enabled: boolean;
+  watch: string[];
+  cwd: string;
+  debounce: number;
+}
+
+interface FileChangeEvent {
+  serverName: string;
+  files: string[];
+  relativeFiles: string[];
+  watchingDir: string;
+  timestamp: string;
+}
+
+interface DevWatcherStatus {
+  enabled: boolean;
+  isWatching: boolean;
+  config: NormalizedDevConfig;
+  watchingDir: string;
+}
+
 export class DevWatcher extends EventEmitter {
-  constructor(serverName, devConfig) {
+  private serverName: string;
+  private devConfig: NormalizedDevConfig;
+  private watcher: chokidar.FSWatcher | null;
+  private debounceTimer: NodeJS.Timeout | null;
+  private isWatching: boolean;
+  private changedFiles: Set<string>;
+
+  constructor(serverName: string, devConfig: DevConfig) {
     super();
     this.serverName = serverName;
     this.devConfig = this.#normalizeConfig(devConfig);
@@ -14,7 +50,7 @@ export class DevWatcher extends EventEmitter {
     this.changedFiles = new Set(); // Track files that changed during debounce
   }
 
-  #normalizeConfig(devConfig) {
+  #normalizeConfig(devConfig: DevConfig): NormalizedDevConfig {
     return {
       enabled: devConfig.enabled ?? true,
       watch: devConfig.watch ?? ["**/*.js", "**/*.ts", "**/*.py", "**/*.json"],
@@ -23,13 +59,13 @@ export class DevWatcher extends EventEmitter {
     };
   }
 
-  #shouldEnableDevMode() {
+  #shouldEnableDevMode(): boolean {
     return this.devConfig.enabled === true;
   }
 
-  async start(config) {
+  async start(config?: DevConfig): Promise<void> {
     if (config) {
-      this.devConfig = config
+      this.devConfig = this.#normalizeConfig(config);
     }
     if (!this.#shouldEnableDevMode()) {
       return;
@@ -82,7 +118,7 @@ export class DevWatcher extends EventEmitter {
     }
   }
 
-  #handleFileChange(filePath, eventType) {
+  #handleFileChange(filePath: string, eventType: string): void {
     // Add file to changed files set
     this.changedFiles.add(filePath);
 
@@ -119,7 +155,7 @@ export class DevWatcher extends EventEmitter {
     }, this.devConfig.debounce);
   }
 
-  async stop() {
+  async stop(): Promise<void> {
     if (!this.isWatching) {
       return;
     }
@@ -143,7 +179,7 @@ export class DevWatcher extends EventEmitter {
     logger.info(`Dev watcher stopped for server '${this.serverName}'`);
   }
 
-  getStatus() {
+  getStatus(): DevWatcherStatus {
     return {
       enabled: this.#shouldEnableDevMode(),
       isWatching: this.isWatching,

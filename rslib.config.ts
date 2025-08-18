@@ -17,7 +17,7 @@ export default defineConfig({
         'process.env.VERSION': `"${version}"`
     },
     entry: {
-      cli: ['src/utils/cli.js'],
+      cli: ['src/utils/cli.ts'],
     },
   },
   lib: [
